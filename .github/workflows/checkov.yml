@@ -1,0 +1,31 @@
+name: Checkov Custom Policy Scan
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  checkov_custom:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+
+      - name: Install Checkov
+        run: pip install checkov
+
+      - name: Run Checkov with custom policy
+        run: |
+          checkov -d . \
+            --external-checks-dir ./custom-policies \
+            --check CKV_AWS_CUSTOM_001 \
+            --compact
