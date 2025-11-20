@@ -23,9 +23,8 @@ jobs:
       - name: Install Checkov
         run: pip install checkov
 
-      - name: Run Checkov with custom policy
+      - name: Run Checkov with built-in and custom checks
         run: |
           checkov -d . \
             --external-checks-dir ./custom-policies \
-            --check CKV_AWS_CUSTOM_001 \
             --compact
