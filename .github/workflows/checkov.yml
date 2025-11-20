@@ -8,6 +8,9 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+
 jobs:
   checkov_custom:
     runs-on: ubuntu-latest
