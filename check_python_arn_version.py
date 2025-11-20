@@ -1,35 +1,57 @@
 import os
 import re
 
-# Regex: matches ARNs ending with :<number>, skips common Lambda Layer ARNs
+# Same regex pattern used in your Checkov policy
 VERSION_PATTERN = re.compile(r'arn:aws:[^:]+:[^:]*:[^:]*:[^:]+:\d+$')
 
-def is_lambda_layer_arn(arn: str) -> bool:
-    # Lambda Layer ARNs have ':layer:' before the version, which is OK
-    return ':layer:' in arn
+def find_python_files(root_dir="."):
+    """Recursively collect all .py files."""
+    py_files = []
+    for root, _, files in os.walk(root_dir):
+        for f in files:
+            if f.endswith(".py"):
+                py_files.append(os.path.join(root, f))
+    return py_files
 
-def scan_file(filepath):
-    found = False
-    with open(filepath, 'r', encoding='utf-8') as f:
-        for lineno, line in enumerate(f, 1):
-            matches = VERSION_PATTERN.findall(line)
-            for arn in matches:
-                if not is_lambda_layer_arn(arn):
-                    print(f"Version-pinned ARN found in {filepath}:{lineno}: {arn}")
-                    found = True
-    return found
+def scan_file_for_pinned_arns(file_path):
+    """Return all version-pinned ARNs found in a file."""
+    matches = []
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            for line_no, line in enumerate(f, start=1):
+                found = VERSION_PATTERN.findall(line)
+                if found:
+                    matches.append((line_no, line.strip(), found))
+    except (UnicodeDecodeError, PermissionError):
+        pass
+    return matches
 
 def main():
-    found_any = False
-    for root, _, files in os.walk('.'):
-        for fname in files:
-            # Scan typical code and config files; add/remove extensions as needed
-            if fname.endswith(('.py', '.tf', '.json', '.yml', '.yaml')):
-                path = os.path.join(root, fname)
-                if scan_file(path):
-                    found_any = True
-    if not found_any:
-        print("No version-pinned ARNs found in scanned files.")
+    print("\nScanning Python files for version-pinned ARNs...\n")
+
+    py_files = find_python_files(".")
+    report = {}
+
+    for py_file in py_files:
+        matches = scan_file_for_pinned_arns(py_file)
+        if matches:
+            report[py_file] = matches
+
+    if not report:
+        print("No version-pinned ARNs found in any .py file.")
+        return
+
+    print("Version-pinned ARNs detected:\n")
+
+    for file_path, entries in report.items():
+        print(f"File: {file_path}")
+        for line_no, line, arns in entries:
+            print(f"  - Line {line_no}: {line}")
+            for arn in arns:
+                print(f"      -> {arn}")
+        print()
+
+    print("Recommendation: Remove version pinning from ARNs.\n")
 
 if __name__ == "__main__":
     main()
