@@ -2,8 +2,8 @@ import re
 from checkov.terraform.checks.resource.base_resource_check import BaseResourceCheck
 from checkov.common.models.enums import CheckResult, CheckCategories
 
-# FIXED regex: matches ANY AWS ARN ending with a version number
-VERSION_PATTERN = re.compile(r'arn:aws:[^"\']*:\d+(?=["\'\s]|$)')
+# Regex: Matches ANY AWS ARN ending with :<number>
+VERSION_PATTERN = re.compile(r'arn:aws:[^"\'\s]*:\d+(?=["\'\s]|$)')
 
 class NoVersionPinnedARN(BaseResourceCheck):
     def __init__(self):
@@ -13,10 +13,10 @@ class NoVersionPinnedARN(BaseResourceCheck):
             "aws_batch_job_definition",
             "aws_lambda_function",
             "aws_ecs_task_definition",
-            "aws_autoscaling_group",       # Checks IAM roles and target group ARNs in Auto Scaling Groups
-            "aws_launch_template",         # Checks instance profiles in Launch Templates
-            "aws_lambda_layer_version",    # Checks layer versions in Lambda Layers
-            "aws_sfn_state_machine",       # Checks roles and definitions in Step Functions State Machines
+            "aws_autoscaling_group",       # IAM roles and target group ARNs in Auto Scaling Groups
+            "aws_launch_template",         # Instance profiles in Launch Templates
+            "aws_lambda_layer_version",    # Layer versions in Lambda Layers
+            "aws_sfn_state_machine",       # Roles and definitions in Step Functions State Machines
         ]
         categories = [CheckCategories.GENERAL_SECURITY]
         super().__init__(name=name, id=id, categories=categories, supported_resources=supported_resources)
@@ -25,20 +25,18 @@ class NoVersionPinnedARN(BaseResourceCheck):
         """
         Scan the Terraform resource configuration for version-pinned ARNs.
         """
-        # List of attribute keys likely to contain ARNs in the supported resources
         keys_to_check = [
             "role",
             "execution_role_arn",
             "task_role_arn",
             "container_definitions",
-            "layers",                    # Lambda function can have layers with version
-            "service_linked_role_arn",   # Used in Auto Scaling Groups for roles
-            "target_group_arns",         # Used in Auto Scaling Groups for referenced resources
-            "iam_instance_profile",      # Used in Launch Templates for profiles
-            "role_arn",                  # Used in Step Functions for role assignment
-            "definition",                # Step Functions definition, may reference versioned functions
+            "layers",                    # Lambda functions and layers
+            "service_linked_role_arn",
+            "target_group_arns",
+            "iam_instance_profile",
+            "role_arn",                  # Step Functions
+            "definition",                # Step Functions definition (can contain ARNs)
         ]
-
         for key in keys_to_check:
             if key in conf:
                 if self._check_for_version_pinned_arn(conf[key]):
