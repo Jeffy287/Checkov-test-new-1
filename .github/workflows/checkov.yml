@@ -27,9 +27,31 @@ jobs:
         run: |
           checkov -d . \
             --external-checks-dir ./custom-policies \
-            --compact
+            --compact \
+            --check CKV_AWS_CUSTOM_001 \
+            --quiet > checkov_results.txt || true
         continue-on-error: true
 
       - name: Run Python ARN version pin check
-        run: python check_python_arn_version.py
+        run: |
+          python check_python_arn_version.py > pyarn_results.txt || true
         continue-on-error: true
+
+      - name: Combine scan results
+        run: |
+          echo "### Version-pinned ARNs Detected" > pr_arn_report.md
+          FOUND=0
+          if [ -s checkov_results.txt ]; then
+            FOUND=1
+            echo -e "\n#### Terraform/Checkov Violations\n\`\`\`\n$(cat checkov_results.txt)\n\`\`\`" >> pr_arn_report.md
+          fi
+          if [ -s pyarn_results.txt ]; then
+            FOUND=1
+            echo -e "\n#### Python File Violations\n\`\`\`\n$(cat pyarn_results.txt)\n\`\`\`" >> pr_arn_report.md
+          fi
+          [ $FOUND -eq 1 ] || echo -e "No version-pinned ARNs were found! :white_check_mark:" >> pr_arn_report.md
+
+      - name: Comment scan results in PR
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          path: pr_arn_report.md
