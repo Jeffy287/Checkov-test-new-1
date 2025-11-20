@@ -1,8 +1,10 @@
 import os
 import re
 
-# Same regex pattern used in your Checkov policy
-VERSION_PATTERN = re.compile(r'arn:aws:[^:]+:[^:]*:[^:]*:[^:]+:\d+$')
+# Improved regex: detects version-pinned ARNs even when followed by " ' or whitespace
+VERSION_PATTERN = re.compile(
+    r'arn:aws:[^:]+:[^:]*:[^:]*:[^:]+:\d+(?=["\'\s])'
+)
 
 def find_python_files(root_dir="."):
     """Recursively collect all .py files."""
