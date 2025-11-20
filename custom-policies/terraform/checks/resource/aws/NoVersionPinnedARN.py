@@ -2,8 +2,8 @@ import re
 from checkov.terraform.checks.resource.base_resource_check import BaseResourceCheck
 from checkov.common.models.enums import CheckResult, CheckCategories
 
-# Regex to match ARNs with version pinning (numbers at the end after colon)
-VERSION_PATTERN = re.compile(r'arn:aws:[^:]+:[^:]*:[^:]*:[^:]+:\d+$')
+# FIXED regex: matches ANY AWS ARN ending with a version number
+VERSION_PATTERN = re.compile(r'arn:aws:[^"\']*:\d+(?=["\'\s]|$)')
 
 class NoVersionPinnedARN(BaseResourceCheck):
     def __init__(self):
