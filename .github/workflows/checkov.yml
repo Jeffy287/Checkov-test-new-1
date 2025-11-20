@@ -28,3 +28,6 @@ jobs:
           checkov -d . \
             --external-checks-dir ./custom-policies \
             --compact
+
+      - name: Run Python ARN version pin check
+        run: python check_python_arn_version.py
