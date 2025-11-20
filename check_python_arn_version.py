@@ -1,9 +1,9 @@
 import os
 import re
 
-# Detect any ARN ending with a version number before a quote or whitespace
+# FIXED REGEX: matches ANY ARN ending with :<number>
 VERSION_PATTERN = re.compile(
-    r'arn:aws:[^:]+:[^:]*:[^:]*:[^:]+:\d+(?=["\'\s])'
+    r'arn:aws:[^"\']*:\d+(?=["\'\s])'
 )
 
 def find_python_files(root_dir="."):
