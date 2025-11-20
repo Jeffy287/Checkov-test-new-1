@@ -1,7 +1,7 @@
 import os
 import re
 
-# Improved regex: detects version-pinned ARNs even when followed by " ' or whitespace
+# Detect any ARN ending with a version number before a quote or whitespace
 VERSION_PATTERN = re.compile(
     r'arn:aws:[^:]+:[^:]*:[^:]*:[^:]+:\d+(?=["\'\s])'
 )
