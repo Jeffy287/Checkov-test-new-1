@@ -1,10 +1,43 @@
-# Customer-managed KMS keys
+# KMS key for Lambda environment variable encryption
 resource "aws_kms_key" "lambda_env_encryption" {
-  description = "KMS key for Lambda environment variable encryption"
+  description          = "KMS key for Lambda env encryption"
+  enable_key_rotation  = true
+  policy               = <<EOF
+{
+  "Version": "2012-10-17",
+  "Id": "key-default-1",
+  "Statement": [
+    {
+      "Sid": "Enable IAM User Permissions",
+      "Effect": "Allow",
+      "Principal": { "AWS": "*" },
+      "Action": "kms:*",
+      "Resource": "*"
+    }
+  ]
+}
+EOF
 }
 
+# KMS key for SQS encryption
 resource "aws_kms_key" "sqs_encryption" {
-  description = "KMS key for SQS encryption"
+  description          = "KMS key for SQS encryption"
+  enable_key_rotation  = true
+  policy               = <<EOF
+{
+  "Version": "2012-10-17",
+  "Id": "key-default-1",
+  "Statement": [
+    {
+      "Sid": "Enable IAM User Permissions",
+      "Effect": "Allow",
+      "Principal": { "AWS": "*" },
+      "Action": "kms:*",
+      "Resource": "*"
+    }
+  ]
+}
+EOF
 }
 
 # SQS Dead Letter Queue (DLQ)
@@ -13,7 +46,7 @@ resource "aws_sqs_queue" "my_dlq" {
   kms_master_key_id = aws_kms_key.sqs_encryption.arn
 }
 
-# Lambda code signing config (required by Checkov)
+# Lambda code signing config
 resource "aws_lambda_code_signing_config" "example" {
   allowed_publishers {
     signing_profile_version_arns = ["arn:aws:signer:us-east-1:123456789012:signing-profile/example/00000000000000000000000000000000"]
@@ -23,7 +56,7 @@ resource "aws_lambda_code_signing_config" "example" {
   }
 }
 
-# Networking resources (use your actual VPC/subnet IDs)
+# VPC networking resources (replace with your own IDs)
 resource "aws_subnet" "example" {
   vpc_id            = "vpc-xxxxxxx"
   cidr_block        = "10.0.0.0/24"
@@ -36,7 +69,7 @@ resource "aws_security_group" "example" {
   vpc_id      = "vpc-xxxxxxx"
 }
 
-# Lambda execution role (no version-pinned ARN!)
+# IAM Role for Lambda (no version-pinned ARN)
 resource "aws_iam_role" "lambda_exec" {
   name = "lambda_exec_role"
   assume_role_policy = jsonencode({
