@@ -1,25 +1,35 @@
-  jobs:
-    checkov_custom:
-      runs-on: ubuntu-latest
-      steps:
-        - name: Checkout code
-          uses: actions/checkout@v4
+name: Checkov Custom Policy Scan
 
-        - name: Set up Python
-          uses: actions/setup-python@v5
-          with:
-            python-version: '3.9'
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
 
-        - name: Install Checkov
-          run: pip install checkov
+jobs:
+  checkov_custom:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-        - name: Run Checkov with built-in and custom checks
-          run: |
-            checkov -d . \
-              --external-checks-dir ./custom-policies \
-              --compact
-          continue-on-error: true   # <--- This allows pipeline to continue even if Checkov fails
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
 
-        - name: Run Python ARN version pin check
-          run: python check_python_arn_version.py
-          continue-on-error: true   # <--- This allows pipeline to continue even if this fails
+      - name: Install Checkov
+        run: pip install checkov
+
+      - name: Run Checkov with built-in and custom checks
+        run: |
+          checkov -d . \
+            --external-checks-dir ./custom-policies \
+            --compact
+        continue-on-error: true
+
+      - name: Run Python ARN version pin check
+        run: python check_python_arn_version.py
+        continue-on-error: true
