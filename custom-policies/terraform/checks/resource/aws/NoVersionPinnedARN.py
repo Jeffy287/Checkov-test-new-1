@@ -2,7 +2,6 @@ import re
 from checkov.terraform.checks.resource.base_resource_check import BaseResourceCheck
 from checkov.common.models.enums import CheckResult, CheckCategories
 
-# Regex: match any AWS ARN ending with :<number> (version pin)
 VERSION_PATTERN = re.compile(r'arn:aws:[^"\'\s]*:\d+(?=["\'\s]|$)')
 
 class NoVersionPinnedARN(BaseResourceCheck):
@@ -22,10 +21,6 @@ class NoVersionPinnedARN(BaseResourceCheck):
         super().__init__(name=name, id=id, categories=categories, supported_resources=supported_resources)
 
     def scan_resource_conf(self, conf, entity_type=None):
-        """
-        Scan the resource configuration for any string/list/dict containing version-pinned ARNs.
-        """
-        # Keys that often contain ARNs
         keys_to_check = [
             "role",
             "execution_role_arn",
@@ -37,6 +32,8 @@ class NoVersionPinnedARN(BaseResourceCheck):
             "iam_instance_profile",
             "role_arn",
             "definition",
+            "arn",        # <--- now included for direct ARNs (e.g. Lambda Layers)
+            "layer_arn"
         ]
 
         for key in keys_to_check:
@@ -46,9 +43,6 @@ class NoVersionPinnedARN(BaseResourceCheck):
         return CheckResult.PASSED
 
     def _contains_version_pinned_arn(self, obj):
-        """
-        Recursively check strings, lists, dicts for version-pinned ARNs.
-        """
         if isinstance(obj, str):
             if VERSION_PATTERN.search(obj):
                 return True
@@ -62,5 +56,4 @@ class NoVersionPinnedARN(BaseResourceCheck):
                     return True
         return False
 
-# Instantiate the check
 check = NoVersionPinnedARN()
