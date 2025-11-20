@@ -13,15 +13,31 @@ class NoVersionPinnedARN(BaseResourceCheck):
             "aws_batch_job_definition",
             "aws_lambda_function",
             "aws_ecs_task_definition",
+            "aws_autoscaling_group",       # Checks IAM roles and target group ARNs in Auto Scaling Groups
+            "aws_launch_template",         # Checks instance profiles in Launch Templates
+            "aws_lambda_layer_version",    # Checks layer versions in Lambda Layers
+            "aws_sfn_state_machine",       # Checks roles and definitions in Step Functions State Machines
         ]
         categories = [CheckCategories.GENERAL_SECURITY]
         super().__init__(name=name, id=id, categories=categories, supported_resources=supported_resources)
 
-    def scan_resource_conf(self, conf, entity_type=None):  # ✅ Make entity_type optional
+    def scan_resource_conf(self, conf, entity_type=None):
         """
         Scan the Terraform resource configuration for version-pinned ARNs.
         """
-        keys_to_check = ["role", "execution_role_arn", "task_role_arn", "container_definitions"]
+        # List of attribute keys likely to contain ARNs in the supported resources
+        keys_to_check = [
+            "role",
+            "execution_role_arn",
+            "task_role_arn",
+            "container_definitions",
+            "layers",                    # Lambda function can have layers with version
+            "service_linked_role_arn",   # Used in Auto Scaling Groups for roles
+            "target_group_arns",         # Used in Auto Scaling Groups for referenced resources
+            "iam_instance_profile",      # Used in Launch Templates for profiles
+            "role_arn",                  # Used in Step Functions for role assignment
+            "definition",                # Step Functions definition, may reference versioned functions
+        ]
 
         for key in keys_to_check:
             if key in conf:
