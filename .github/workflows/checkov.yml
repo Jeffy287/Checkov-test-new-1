@@ -28,7 +28,6 @@ jobs:
         run: |
           checkov -d . \
             --external-checks-dir ./custom-policies \
-            --check CKV_AWS_CUSTOM_001 \
             --quiet > checkov_results.txt || true
         continue-on-error: true
 
@@ -37,19 +36,27 @@ jobs:
           python check_python_arn_version.py > pyarn_results.txt || true
         continue-on-error: true
 
-      - name: Combine scan results
+      - name: Combine scan results (built-in and custom separated)
         run: |
-          echo "### Version-pinned ARNs Detected" > pr_arn_report.md
-          FOUND=0
-          if [ -s checkov_results.txt ]; then
-            FOUND=1
-            echo -e "\n#### Terraform/Checkov Violations\n\`\`\`\n$(cat checkov_results.txt)\n\`\`\`" >> pr_arn_report.md
+          echo "### Policy Violations and Version-pinned ARNs Detected" > pr_arn_report.md
+
+          BUILTIN_FAILS=$(grep -v "CKV_AWS_CUSTOM_001" checkov_results.txt | grep -E "FAILED|Check:")
+          if [ -n "$BUILTIN_FAILS" ]; then
+            echo -e "\n#### Terraform/Checkov Built-in Policy Failures\n\`\`\`\n$BUILTIN_FAILS\n\`\`\`" >> pr_arn_report.md
           fi
+
+          CUSTOM_FAILS=$(grep "CKV_AWS_CUSTOM_001" checkov_results.txt | grep -E "FAILED|Check:")
+          if [ -n "$CUSTOM_FAILS" ]; then
+            echo -e "\n#### Terraform/Checkov Custom Policy Failures\n\`\`\`\n$CUSTOM_FAILS\n\`\`\`" >> pr_arn_report.md
+          fi
+
           if [ -s pyarn_results.txt ]; then
-            FOUND=1
             echo -e "\n#### Python File Violations\n\`\`\`\n$(cat pyarn_results.txt)\n\`\`\`" >> pr_arn_report.md
           fi
-          [ $FOUND -eq 1 ] || echo -e "No version-pinned ARNs were found! :white_check_mark:" >> pr_arn_report.md
+
+          if ! grep -q "FAILED" pr_arn_report.md && ! [ -s pyarn_results.txt ]; then
+            echo -e "No policy violations or version-pinned ARNs were found! :white_check_mark:" > pr_arn_report.md
+          fi
 
       - name: Comment scan results in PR
         uses: marocchino/sticky-pull-request-comment@v2
