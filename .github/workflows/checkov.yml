@@ -1,15 +1,17 @@
 name: Checkov Custom Policy Scan
 
 on:
-  push:
-    branches: [ "main" ]
   pull_request:
-    branches: [ "main" ]
+    branches:
+      - main
+
+permissions:
+  contents: read
+  pull-requests: write
 
 jobs:
   checkov_custom:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -19,31 +21,66 @@ jobs:
         with:
           python-version: '3.9'
 
-      - name: Install Checkov & Dependencies
-        run: |
-          pip install checkov
+      - name: Install Checkov
+        run: pip install checkov
 
-      # ---- RUN DEFAULT + CUSTOM POLICY SCAN ----
-      - name: Run Checkov (default + custom checks)
-        id: checkov_scan
+      - name: Run Checkov with built-in and custom checks
         run: |
-          echo "=== CHECKOV DEFAULT + CUSTOM POLICY RESULTS ===" > scan_output.txt
           checkov -d . \
             --external-checks-dir ./custom-policies \
-            --compact >> scan_output.txt
+            > checkov_results.txt || true   # No --quiet: still groups blocks for easy parsing
         continue-on-error: true
 
-      # ---- RUN PYTHON ARN VERSION CHECK ----
-      - name: Run Python ARN Version Pin Scan
-        id: python_scan
+      - name: Run Python ARN version pin check
         run: |
-          echo "" >> scan_output.txt
-          echo "=== PYTHON ARN VERSION PIN RESULTS ===" >> scan_output.txt
-          python check_python_arn_version.py >> scan_output.txt
+          python check_python_arn_version.py > pyarn_results.txt || true
         continue-on-error: true
 
-      # ---- COMBINE & PRINT EVERYTHING ----
-      - name: Print complete security scan results
+      - name: Combine scan results (failures only, grouped output)
         run: |
-          echo "FINAL SECURITY REPORT:"
-          cat scan_output.txt
+          echo "### Policy Violations and Version-pinned ARNs Detected" > pr_arn_report.md
+
+          # Built-in policy failures (excluding CKV_AWS_CUSTOM_001)
+          awk '
+          BEGIN {in_block=0}
+          /^Check: / {if(in_block && block ~ /FAILED for resource:/){print block}; block=""; in_block=0}
+          /^Check: / && !/CKV_AWS_CUSTOM_001/ {block=$0"\n"; in_block=1; next}
+          in_block==1 {block=block $0 "\n"}
+          END{if(in_block && block ~ /FAILED for resource:/){print block}}
+          ' checkov_results.txt > builtin_blocks.txt
+          if [ -s builtin_blocks.txt ]; then
+            echo -e "\n#### Terraform/Checkov Built-in Policy Failures\n\`\`\`" >> pr_arn_report.md
+            cat builtin_blocks.txt >> pr_arn_report.md
+            echo -e "\n\`\`\`" >> pr_arn_report.md
+          fi
+
+          # Custom CKV_AWS_CUSTOM_001 policy failures only
+          awk '
+          BEGIN {in_block=0}
+          /^Check: / {if(in_block && block ~ /FAILED for resource:/){print block}; block=""; in_block=0}
+          /^Check: CKV_AWS_CUSTOM_001/ {block=$0"\n"; in_block=1; next}
+          in_block==1 {block=block $0 "\n"}
+          END{if(in_block && block ~ /FAILED for resource:/){print block}}
+          ' checkov_results.txt > custom_blocks.txt
+          if [ -s custom_blocks.txt ]; then
+            echo -e "\n#### Terraform/Checkov Custom Policy Failures\n\`\`\`" >> pr_arn_report.md
+            cat custom_blocks.txt >> pr_arn_report.md
+            echo -e "\n\`\`\`" >> pr_arn_report.md
+          fi
+
+          # Python file violations
+          if [ -s pyarn_results.txt ]; then
+            echo -e "\n#### Python File Violations\n\`\`\`\n$(cat pyarn_results.txt)\n\`\`\`" >> pr_arn_report.md
+          fi
+
+          # Only green check if nothing failed at all
+          BUILTIN_FAILS=$(grep -c "FAILED for resource:" builtin_blocks.txt || true)
+          CUSTOM_FAILS=$(grep -c "FAILED for resource:" custom_blocks.txt || true)
+          if [ "$BUILTIN_FAILS" -eq 0 ] && [ "$CUSTOM_FAILS" -eq 0 ] && ! [ -s pyarn_results.txt ]; then
+            echo -e "No policy violations or version-pinned ARNs were found! :white_check_mark:" > pr_arn_report.md
+          fi
+
+      - name: Comment scan results in PR
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          path: pr_arn_report.md
