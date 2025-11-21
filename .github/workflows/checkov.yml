@@ -40,13 +40,13 @@ jobs:
         run: |
           echo "### Policy Violations and Version-pinned ARNs Detected" > pr_arn_report.md
 
-          # Group and append built-in Checkov policy blocks (everything except your custom check)
+          # Built-in policies (everything except CKV_AWS_CUSTOM_001)
           awk '
-              BEGIN {block=""; show=0} 
-              /^Check: /{if(block && show==1){print block}; block=$0 RS; show=1; next}
-              /CKV_AWS_CUSTOM_001/ {show=0; next}
-              NF {block=block $0 RS}
-              END {if(block && show==1){print block}}
+          BEGIN {in_block=0}
+          /^Check: / {if(in_block){print block}; block=""; in_block=0}
+          /^Check: / && !/CKV_AWS_CUSTOM_001/ {block=$0"\n"; in_block=1; next}
+          in_block==1 {block=block $0 "\n"}
+          END{if(in_block){print block}}
           ' checkov_results.txt > builtin_blocks.txt
           if [ -s builtin_blocks.txt ]; then
             echo -e "\n#### Terraform/Checkov Built-in Policy Failures\n\`\`\`" >> pr_arn_report.md
@@ -54,13 +54,13 @@ jobs:
             echo -e "\n\`\`\`" >> pr_arn_report.md
           fi
 
-          # Group and append your custom Checkov policy blocks only
+          # Custom CKV_AWS_CUSTOM_001 policies only
           awk '
-              BEGIN {block=""; show=0} 
-              /^Check: CKV_AWS_CUSTOM_001/{if(block && show==1){print block}; block=$0 RS; show=1; next}
-              /^Check: /{show=0; next}
-              NF {block=block $0 RS}
-              END {if(block && show==1){print block}}
+          BEGIN {in_block=0}
+          /^Check: / {if(in_block){print block}; block=""; in_block=0}
+          /^Check: CKV_AWS_CUSTOM_001/ {block=$0"\n"; in_block=1; next}
+          in_block==1 {block=block $0 "\n"}
+          END{if(in_block){print block}}
           ' checkov_results.txt > custom_blocks.txt
           if [ -s custom_blocks.txt ]; then
             echo -e "\n#### Terraform/Checkov Custom Policy Failures\n\`\`\`" >> pr_arn_report.md
@@ -68,13 +68,17 @@ jobs:
             echo -e "\n\`\`\`" >> pr_arn_report.md
           fi
 
-          # Add Python scan results
+          # Python file violations
           if [ -s pyarn_results.txt ]; then
             echo -e "\n#### Python File Violations\n\`\`\`\n$(cat pyarn_results.txt)\n\`\`\`" >> pr_arn_report.md
           fi
 
-          # Clean all-blocks, green if no issues at all
-          if ! grep -q "FAILED" pr_arn_report.md && ! [ -s pyarn_results.txt ]; then
+          # Print green check if no fails
+          FOUND=0
+          if grep -q "FAILED" pr_arn_report.md || [ -s pyarn_results.txt ]; then
+            FOUND=1
+          fi
+          if [ $FOUND -eq 0 ]; then
             echo -e "No policy violations or version-pinned ARNs were found! :white_check_mark:" > pr_arn_report.md
           fi
 
