@@ -1,12 +1,13 @@
 name: Checkov Custom Policy Scan
 
 on:
-  push:
-    branches:
-      - main
   pull_request:
     branches:
       - main
+
+permissions:
+  contents: read
+  pull-requests: write
 
 jobs:
   checkov_custom:
@@ -27,9 +28,71 @@ jobs:
         run: |
           checkov -d . \
             --external-checks-dir ./custom-policies \
-            --compact
+            > checkov_results.txt || true
         continue-on-error: true
 
       - name: Run Python ARN version pin check
-        run: python check_python_arn_version.py
+        run: |
+          python check_python_arn_version.py > pyarn_results.txt || true
         continue-on-error: true
+
+      - name: Post built-in Checkov failures as PR comments
+        run: |
+          awk '
+          BEGIN {in_block=0}
+          /^Check: / {if(in_block && block ~ /FAILED for resource:/){print block > "fail" ++fail ".txt"}; block=""; in_block=0}
+          /^Check: / && !/CKV_AWS_CUSTOM_001/ {block=$0"\n"; in_block=1; next}
+          in_block==1 {block=block $0 "\n"}
+          END{if(in_block && block ~ /FAILED for resource:/){print block > "fail" ++fail ".txt"}}
+          ' checkov_results.txt
+
+          for file in fail*.txt; do
+            if [ -s "$file" ]; then
+              gh pr comment "$PR_NUMBER" --body "$(cat $file)"
+            fi
+          done
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+
+      - name: Post custom Checkov failures as PR comments
+        run: |
+          awk '
+          BEGIN {in_block=0}
+          /^Check: / {if(in_block && block ~ /FAILED for resource:/){print block > "cfail" ++fail ".txt"}; block=""; in_block=0}
+          /^Check: CKV_AWS_CUSTOM_001/ {block=$0"\n"; in_block=1; next}
+          in_block==1 {block=block $0 "\n"}
+          END{if(in_block && block ~ /FAILED for resource:/){print block > "cfail" ++fail ".txt"}}
+          ' checkov_results.txt
+
+          for file in cfail*.txt; do
+            if [ -s "$file" ]; then
+              gh pr comment "$PR_NUMBER" --body "$(cat $file)"
+            fi
+          done
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+
+      - name: Post Python ARN violations as PR comments
+        run: |
+          if [ -s pyarn_results.txt ]; then
+            awk '/File: /{if(L){print L > ("pyfail" ++fail ".txt")}; L=$0; next} L{L=L"\n"$0} END{if(L){print L > ("pyfail" ++fail ".txt")}}' pyarn_results.txt
+            for file in pyfail*.txt; do
+              if [ -s "$file" ]; then
+                gh pr comment "$PR_NUMBER" --body "$(cat $file)"
+              fi
+            done
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+
+      - name: Post green check if nothing failed
+        run: |
+          if ! ls fail*.txt 1> /dev/null 2>&1 && ! ls cfail*.txt 1> /dev/null 2>&1 && ! ls pyfail*.txt 1> /dev/null 2>&1; then
+            gh pr comment "$PR_NUMBER" --body "No policy violations or version-pinned ARNs were found! :white_check_mark:"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
