@@ -36,24 +36,44 @@ jobs:
           python check_python_arn_version.py > pyarn_results.txt || true
         continue-on-error: true
 
-      - name: Combine scan results (built-in and custom separated)
+      - name: Combine scan results (grouped output)
         run: |
           echo "### Policy Violations and Version-pinned ARNs Detected" > pr_arn_report.md
 
-          BUILTIN_FAILS=$(grep -v "CKV_AWS_CUSTOM_001" checkov_results.txt | grep -E "FAILED|Check:")
-          if [ -n "$BUILTIN_FAILS" ]; then
-            echo -e "\n#### Terraform/Checkov Built-in Policy Failures\n\`\`\`\n$BUILTIN_FAILS\n\`\`\`" >> pr_arn_report.md
+          # Group and append built-in Checkov policy blocks (everything except your custom check)
+          awk '
+              BEGIN {block=""; show=0} 
+              /^Check: /{if(block && show==1){print block}; block=$0 RS; show=1; next}
+              /CKV_AWS_CUSTOM_001/ {show=0; next}
+              NF {block=block $0 RS}
+              END {if(block && show==1){print block}}
+          ' checkov_results.txt > builtin_blocks.txt
+          if [ -s builtin_blocks.txt ]; then
+            echo -e "\n#### Terraform/Checkov Built-in Policy Failures\n\`\`\`" >> pr_arn_report.md
+            cat builtin_blocks.txt >> pr_arn_report.md
+            echo -e "\n\`\`\`" >> pr_arn_report.md
           fi
 
-          CUSTOM_FAILS=$(grep "CKV_AWS_CUSTOM_001" checkov_results.txt | grep -E "FAILED|Check:")
-          if [ -n "$CUSTOM_FAILS" ]; then
-            echo -e "\n#### Terraform/Checkov Custom Policy Failures\n\`\`\`\n$CUSTOM_FAILS\n\`\`\`" >> pr_arn_report.md
+          # Group and append your custom Checkov policy blocks only
+          awk '
+              BEGIN {block=""; show=0} 
+              /^Check: CKV_AWS_CUSTOM_001/{if(block && show==1){print block}; block=$0 RS; show=1; next}
+              /^Check: /{show=0; next}
+              NF {block=block $0 RS}
+              END {if(block && show==1){print block}}
+          ' checkov_results.txt > custom_blocks.txt
+          if [ -s custom_blocks.txt ]; then
+            echo -e "\n#### Terraform/Checkov Custom Policy Failures\n\`\`\`" >> pr_arn_report.md
+            cat custom_blocks.txt >> pr_arn_report.md
+            echo -e "\n\`\`\`" >> pr_arn_report.md
           fi
 
+          # Add Python scan results
           if [ -s pyarn_results.txt ]; then
             echo -e "\n#### Python File Violations\n\`\`\`\n$(cat pyarn_results.txt)\n\`\`\`" >> pr_arn_report.md
           fi
 
+          # Clean all-blocks, green if no issues at all
           if ! grep -q "FAILED" pr_arn_report.md && ! [ -s pyarn_results.txt ]; then
             echo -e "No policy violations or version-pinned ARNs were found! :white_check_mark:" > pr_arn_report.md
           fi
