@@ -36,11 +36,16 @@ jobs:
           python check_python_arn_version.py > pyarn_results.txt || true
         continue-on-error: true
 
-      - name: Combine scan results (grouped output)
+      - name: Combine scan results (grouped output + summary)
         run: |
           echo "### Policy Violations and Version-pinned ARNs Detected" > pr_arn_report.md
 
-          # Built-in policies (everything except CKV_AWS_CUSTOM_001)
+          # Calculate Checkov pass/fail counts
+          PASSED=$(grep -c "^PASSED for resource:" checkov_results.txt || true)
+          FAILED=$(grep -c "^FAILED for resource:" checkov_results.txt || true)
+          echo -e "**Terraform/Checkov Summary:** Passed checks: $PASSED, Failed checks: $FAILED\n" >> pr_arn_report.md
+
+          # Built-in policy failures (excluding CKV_AWS_CUSTOM_001)
           awk '
           BEGIN {in_block=0}
           /^Check: / {if(in_block){print block}; block=""; in_block=0}
@@ -54,7 +59,7 @@ jobs:
             echo -e "\n\`\`\`" >> pr_arn_report.md
           fi
 
-          # Custom CKV_AWS_CUSTOM_001 policies only
+          # Custom CKV_AWS_CUSTOM_001 policy failures only
           awk '
           BEGIN {in_block=0}
           /^Check: / {if(in_block){print block}; block=""; in_block=0}
@@ -73,12 +78,8 @@ jobs:
             echo -e "\n#### Python File Violations\n\`\`\`\n$(cat pyarn_results.txt)\n\`\`\`" >> pr_arn_report.md
           fi
 
-          # Print green check if no fails
-          FOUND=0
-          if grep -q "FAILED" pr_arn_report.md || [ -s pyarn_results.txt ]; then
-            FOUND=1
-          fi
-          if [ $FOUND -eq 0 ]; then
+          # Green check if everything is clean
+          if [ "$FAILED" -eq 0 ] && ! [ -s pyarn_results.txt ]; then
             echo -e "No policy violations or version-pinned ARNs were found! :white_check_mark:" > pr_arn_report.md
           fi
 
