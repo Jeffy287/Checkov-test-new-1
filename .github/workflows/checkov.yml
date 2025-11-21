@@ -1,17 +1,15 @@
 name: Checkov Custom Policy Scan
 
 on:
+  push:
+    branches: [ "main" ]
   pull_request:
-    branches:
-      - main
-
-permissions:
-  contents: read
-  pull-requests: write
+    branches: [ "main" ]
 
 jobs:
   checkov_custom:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -21,69 +19,31 @@ jobs:
         with:
           python-version: '3.9'
 
-      - name: Install Checkov
-        run: pip install checkov
-
-      - name: Run Checkov with built-in and custom checks
+      - name: Install Checkov & Dependencies
         run: |
+          pip install checkov
+
+      # ---- RUN DEFAULT + CUSTOM POLICY SCAN ----
+      - name: Run Checkov (default + custom checks)
+        id: checkov_scan
+        run: |
+          echo "=== CHECKOV DEFAULT + CUSTOM POLICY RESULTS ===" > scan_output.txt
           checkov -d . \
             --external-checks-dir ./custom-policies \
-            --quiet > checkov_results.txt || true
+            --compact >> scan_output.txt
         continue-on-error: true
 
-      - name: Run Python ARN version pin check
+      # ---- RUN PYTHON ARN VERSION CHECK ----
+      - name: Run Python ARN Version Pin Scan
+        id: python_scan
         run: |
-          python check_python_arn_version.py > pyarn_results.txt || true
+          echo "" >> scan_output.txt
+          echo "=== PYTHON ARN VERSION PIN RESULTS ===" >> scan_output.txt
+          python check_python_arn_version.py >> scan_output.txt
         continue-on-error: true
 
-      - name: Combine scan results (grouped output + summary)
+      # ---- COMBINE & PRINT EVERYTHING ----
+      - name: Print complete security scan results
         run: |
-          echo "### Policy Violations and Version-pinned ARNs Detected" > pr_arn_report.md
-
-          # Calculate Checkov pass/fail counts
-          PASSED=$(grep -c "^PASSED for resource:" checkov_results.txt || true)
-          FAILED=$(grep -c "^FAILED for resource:" checkov_results.txt || true)
-          echo -e "**Terraform/Checkov Summary:** Passed checks: $PASSED, Failed checks: $FAILED\n" >> pr_arn_report.md
-
-          # Built-in policy failures (excluding CKV_AWS_CUSTOM_001)
-          awk '
-          BEGIN {in_block=0}
-          /^Check: / {if(in_block){print block}; block=""; in_block=0}
-          /^Check: / && !/CKV_AWS_CUSTOM_001/ {block=$0"\n"; in_block=1; next}
-          in_block==1 {block=block $0 "\n"}
-          END{if(in_block){print block}}
-          ' checkov_results.txt > builtin_blocks.txt
-          if [ -s builtin_blocks.txt ]; then
-            echo -e "\n#### Terraform/Checkov Built-in Policy Failures\n\`\`\`" >> pr_arn_report.md
-            cat builtin_blocks.txt >> pr_arn_report.md
-            echo -e "\n\`\`\`" >> pr_arn_report.md
-          fi
-
-          # Custom CKV_AWS_CUSTOM_001 policy failures only
-          awk '
-          BEGIN {in_block=0}
-          /^Check: / {if(in_block){print block}; block=""; in_block=0}
-          /^Check: CKV_AWS_CUSTOM_001/ {block=$0"\n"; in_block=1; next}
-          in_block==1 {block=block $0 "\n"}
-          END{if(in_block){print block}}
-          ' checkov_results.txt > custom_blocks.txt
-          if [ -s custom_blocks.txt ]; then
-            echo -e "\n#### Terraform/Checkov Custom Policy Failures\n\`\`\`" >> pr_arn_report.md
-            cat custom_blocks.txt >> pr_arn_report.md
-            echo -e "\n\`\`\`" >> pr_arn_report.md
-          fi
-
-          # Python file violations
-          if [ -s pyarn_results.txt ]; then
-            echo -e "\n#### Python File Violations\n\`\`\`\n$(cat pyarn_results.txt)\n\`\`\`" >> pr_arn_report.md
-          fi
-
-          # Green check if everything is clean
-          if [ "$FAILED" -eq 0 ] && ! [ -s pyarn_results.txt ]; then
-            echo -e "No policy violations or version-pinned ARNs were found! :white_check_mark:" > pr_arn_report.md
-          fi
-
-      - name: Comment scan results in PR
-        uses: marocchino/sticky-pull-request-comment@v2
-        with:
-          path: pr_arn_report.md
+          echo "FINAL SECURITY REPORT:"
+          cat scan_output.txt
