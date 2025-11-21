@@ -28,7 +28,7 @@ jobs:
         run: |
           checkov -d . \
             --external-checks-dir ./custom-policies \
-            > checkov_results.txt || true   # No --quiet: still groups blocks for easy parsing
+            > checkov_results.txt || true
         continue-on-error: true
 
       - name: Run Python ARN version pin check
@@ -36,51 +36,63 @@ jobs:
           python check_python_arn_version.py > pyarn_results.txt || true
         continue-on-error: true
 
-      - name: Combine scan results (failures only, grouped output)
+      - name: Post built-in Checkov failures as PR comments
         run: |
-          echo "### Policy Violations and Version-pinned ARNs Detected" > pr_arn_report.md
-
-          # Built-in policy failures (excluding CKV_AWS_CUSTOM_001)
           awk '
           BEGIN {in_block=0}
-          /^Check: / {if(in_block && block ~ /FAILED for resource:/){print block}; block=""; in_block=0}
+          /^Check: / {if(in_block && block ~ /FAILED for resource:/){print block > "fail" ++fail ".txt"}; block=""; in_block=0}
           /^Check: / && !/CKV_AWS_CUSTOM_001/ {block=$0"\n"; in_block=1; next}
           in_block==1 {block=block $0 "\n"}
-          END{if(in_block && block ~ /FAILED for resource:/){print block}}
-          ' checkov_results.txt > builtin_blocks.txt
-          if [ -s builtin_blocks.txt ]; then
-            echo -e "\n#### Terraform/Checkov Built-in Policy Failures\n\`\`\`" >> pr_arn_report.md
-            cat builtin_blocks.txt >> pr_arn_report.md
-            echo -e "\n\`\`\`" >> pr_arn_report.md
-          fi
+          END{if(in_block && block ~ /FAILED for resource:/){print block > "fail" ++fail ".txt"}}
+          ' checkov_results.txt
 
-          # Custom CKV_AWS_CUSTOM_001 policy failures only
+          for file in fail*.txt; do
+            if [ -s "$file" ]; then
+              gh pr comment "$PR_NUMBER" --body "$(cat $file)"
+            fi
+          done
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+
+      - name: Post custom Checkov failures as PR comments
+        run: |
           awk '
           BEGIN {in_block=0}
-          /^Check: / {if(in_block && block ~ /FAILED for resource:/){print block}; block=""; in_block=0}
+          /^Check: / {if(in_block && block ~ /FAILED for resource:/){print block > "cfail" ++fail ".txt"}; block=""; in_block=0}
           /^Check: CKV_AWS_CUSTOM_001/ {block=$0"\n"; in_block=1; next}
           in_block==1 {block=block $0 "\n"}
-          END{if(in_block && block ~ /FAILED for resource:/){print block}}
-          ' checkov_results.txt > custom_blocks.txt
-          if [ -s custom_blocks.txt ]; then
-            echo -e "\n#### Terraform/Checkov Custom Policy Failures\n\`\`\`" >> pr_arn_report.md
-            cat custom_blocks.txt >> pr_arn_report.md
-            echo -e "\n\`\`\`" >> pr_arn_report.md
-          fi
+          END{if(in_block && block ~ /FAILED for resource:/){print block > "cfail" ++fail ".txt"}}
+          ' checkov_results.txt
 
-          # Python file violations
+          for file in cfail*.txt; do
+            if [ -s "$file" ]; then
+              gh pr comment "$PR_NUMBER" --body "$(cat $file)"
+            fi
+          done
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+
+      - name: Post Python ARN violations as PR comments
+        run: |
           if [ -s pyarn_results.txt ]; then
-            echo -e "\n#### Python File Violations\n\`\`\`\n$(cat pyarn_results.txt)\n\`\`\`" >> pr_arn_report.md
+            awk '/File: /{if(L){print L > ("pyfail" ++fail ".txt")}; L=$0; next} L{L=L"\n"$0} END{if(L){print L > ("pyfail" ++fail ".txt")}}' pyarn_results.txt
+            for file in pyfail*.txt; do
+              if [ -s "$file" ]; then
+                gh pr comment "$PR_NUMBER" --body "$(cat $file)"
+              fi
+            done
           fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
 
-          # Only green check if nothing failed at all
-          BUILTIN_FAILS=$(grep -c "FAILED for resource:" builtin_blocks.txt || true)
-          CUSTOM_FAILS=$(grep -c "FAILED for resource:" custom_blocks.txt || true)
-          if [ "$BUILTIN_FAILS" -eq 0 ] && [ "$CUSTOM_FAILS" -eq 0 ] && ! [ -s pyarn_results.txt ]; then
-            echo -e "No policy violations or version-pinned ARNs were found! :white_check_mark:" > pr_arn_report.md
+      - name: Post green check if nothing failed
+        run: |
+          if ! ls fail*.txt 1> /dev/null 2>&1 && ! ls cfail*.txt 1> /dev/null 2>&1 && ! ls pyfail*.txt 1> /dev/null 2>&1; then
+            gh pr comment "$PR_NUMBER" --body "No policy violations or version-pinned ARNs were found! :white_check_mark:"
           fi
-
-      - name: Comment scan results in PR
-        uses: marocchino/sticky-pull-request-comment@v2
-        with:
-          path: pr_arn_report.md
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
