@@ -22,9 +22,9 @@ jobs:
         with:
           python-version: '3.9'
 
-      - name: Install Checkov and jq
+      - name: Install Checkov, Bandit, and jq
         run: |
-          pip install checkov
+          pip install checkov bandit
           sudo apt-get update && sudo apt-get install -y jq
 
       - name: Run Checkov with built-in and custom checks (JSON output)
@@ -34,13 +34,15 @@ jobs:
             -o json > checkov-report.json || true
         continue-on-error: true
 
-      # Optionally, run your Python custom check for ARNs (output plain or JSON as you want)
-      - name: Run Python ARN version pin check
-        run: |
-          python check_python_arn_version.py > pyarn_results.txt || true
+      - name: Run Bandit
+        run: bandit -r . -f json -o bandit-report.json || true
         continue-on-error: true
 
-      - name: Post PR review comments for each Checkov failure (as inline/diff comments)
+      # Optionally, run your Python custom check for ARNs (output to JSON if you want per-line comments!)
+      # - name: Run Python ARN version pin check
+      #   run: python check_python_arn_version.py > python-arn-report.json || true
+
+      - name: Post PR review comments for Checkov failures (inline/diff comments)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
@@ -51,9 +53,13 @@ jobs:
             jq -c '.results.failed_checks[]' checkov-report.json | while read -r issue; do
               FILE_PATH=$(echo "$issue" | jq -r '.file_path')
               LINE=$(echo "$issue" | jq -r '.file_line_range[0]')
-              BODY=$(echo "$issue" | jq -r '[.check_id, .check_name, .guideline] | join(": ")')
-              if [[ -n "$FILE_PATH" && -n "$LINE" && -n "$BODY" ]]; then
-                DISPLAY_PATH="${FILE_PATH#./}"
+              CHECK_ID=$(echo "$issue" | jq -r '.check_id')
+              CHECK_NAME=$(echo "$issue" | jq -r '.check_name')
+              GUIDE=$(echo "$issue" | jq -r '.guideline // empty')
+              BODY="Check: $CHECK_ID: \"$CHECK_NAME\""
+              [ -n "$GUIDE" ] && BODY="$BODY\nGuide: $GUIDE"
+              DISPLAY_PATH="${FILE_PATH#./}"
+              if [[ -n "$DISPLAY_PATH" && -n "$LINE" && -n "$BODY" ]]; then
                 curl -s -L -X POST \
                   -H "Accept: application/vnd.github+json" \
                   -H "Authorization: Bearer $GITHUB_TOKEN" \
@@ -66,18 +72,49 @@ jobs:
                   }"
               fi
             done
-          else
-            echo "No failed Checkov checks found or report file missing."
           fi
 
-      # Optionally, post a green check for no violations found
+      - name: Post PR review comments for Bandit failures (per issue)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          COMMIT_ID: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ -f bandit-report.json ] && jq -e '.results | length > 0' bandit-report.json > /dev/null; then
+            jq -c '.results[]' bandit-report.json | while read -r issue; do
+              FILE_PATH=$(echo "$issue" | jq -r '.filename')
+              LINE=$(echo "$issue" | jq -r '.line_number')
+              TEXT=$(echo "$issue" | jq -r '.issue_text')
+              SEV=$(echo "$issue" | jq -r '.issue_severity')
+              CONF=$(echo "$issue" | jq -r '.issue_confidence')
+              BODY="Bandit: $TEXT (Severity: $SEV, Confidence: $CONF)"
+              DISPLAY_PATH="${FILE_PATH#./}"
+              if [[ -n "$DISPLAY_PATH" && -n "$LINE" && -n "$BODY" ]]; then
+                curl -s -L -X POST \
+                  -H "Accept: application/vnd.github+json" \
+                  -H "Authorization: Bearer $GITHUB_TOKEN" \
+                  "https://api.github.com/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/comments" \
+                  -d "{
+                    \"body\": \"$BODY\",
+                    \"commit_id\": \"$COMMIT_ID\",
+                    \"path\": \"$DISPLAY_PATH\",
+                    \"line\": $LINE
+                  }"
+              fi
+            done
+          fi
+
+      # If nothing fails, post a green check as a regular comment
       - name: Post green check if nothing failed
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          if ! [ -f checkov-report.json ] || ! jq -e '.results.failed_checks | length > 0' checkov-report.json > /dev/null; then
+          CK_FAILS=$(jq '.results.failed_checks | length' checkov-report.json 2>/dev/null || echo 0)
+          BANDIT_FAILS=$(jq '.results | length' bandit-report.json 2>/dev/null || echo 0)
+          if [ "$CK_FAILS" -eq 0 ] && [ "$BANDIT_FAILS" -eq 0 ]; then
             curl -s -L -X POST \
               -H "Accept: application/vnd.github+json" \
               -H "Authorization: Bearer $GITHUB_TOKEN" \
