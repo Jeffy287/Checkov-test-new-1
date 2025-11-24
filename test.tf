@@ -76,13 +76,15 @@ resource "aws_launch_template" "good_lt" {
 ####################
 # Lambda Layer Version
 ####################
-resource "aws_lambda_layer_version" "bad_layer" {
-  layer_name            = "bad_layer"
-  compatible_runtimes   = ["python3.9"]
-  filename              = "layer.zip"
-  # Layer ARN with version
-  arn                   = "arn:aws:lambda:us-east-1:123456789012:layer:custom-layer:9" # Fails: ':9' version
+
+resource "aws_lambda_function" "bad_lambda" {
+  function_name = "bad_lambda"
+  role          = "arn:aws:iam::123456789012:role/lambda-role:2" # Fails: ':2' version
+  handler       = "main.handler" # (CHANGED LINE)
+  runtime       = "python3.9"
+  filename      = "lambda.zip"
 }
+
 
 resource "aws_lambda_layer_version" "good_layer" {
   layer_name            = "good_layer"
