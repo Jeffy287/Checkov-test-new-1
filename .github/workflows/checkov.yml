@@ -2,7 +2,8 @@ name: Checkov Custom Policy Scan
 
 on:
   pull_request:
-    branches: [ main ]
+    branches:
+      - main
 
 permissions:
   contents: read
@@ -19,7 +20,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.9'
+          python-version: "3.9"
 
       - name: Install Checkov
         run: pip install checkov
@@ -27,100 +28,99 @@ jobs:
       - name: Install GitHub CLI
         run: sudo apt-get install gh
 
-      - name: Run Checkov Scan (custom + built-in)
+      # ------------------------------------------------
+      # RUN YOUR SCANS (same as workflow 1)
+      # ------------------------------------------------
+      - name: Run Checkov scan (with custom policies)
         run: |
           checkov -d . \
             --external-checks-dir ./custom-policies \
-            -o json > checkov-report.json || true
+            -o json > checkov_results.json || true
 
-      - name: Run Python ARN Version Check
+      - name: Run Python ARN version pin check
         run: |
-          python check_python_arn_version.py > pyarn-report.txt || true
+          python check_python_arn_version.py > pyarn_results.txt || true
 
-      # ===================================================================
-      # 🔥 INLINE PR COMMENTS JUST LIKE YOUR EXAMPLE WORKFLOW
-      # ===================================================================
-      - name: Post Inline PR Comments for Checkov Failures
+
+      # ------------------------------------------------
+      # INLINE PR COMMENTS (same logic as your workflow #2)
+      # ------------------------------------------------
+      - name: Post inline PR comments for Checkov failures
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
-          PR: ${{ github.event.pull_request.number }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
           COMMIT_ID: ${{ github.event.pull_request.head.sha }}
         run: |
-          if jq -e '.results.failed_checks | length > 0' checkov-report.json >/dev/null; then
-            jq -c '.results.failed_checks[]' checkov-report.json | while read -r issue; do
-              
-              PATH_TO_FILE=$(echo "$issue" | jq -r '.file_path')
+          if jq -e '.results.failed_checks | length > 0' checkov_results.json >/dev/null; then
+            jq -c '.results.failed_checks[]' checkov_results.json | while read -r issue; do
+
+              FILE_PATH=$(echo "$issue" | jq -r '.file_path')
               LINE=$(echo "$issue" | jq -r '.file_line_range[0]')
               BODY=$(echo "$issue" | jq -r '.check_id + ": " + .check_name')
 
-              # Ensure valid inline comment fields
-              if [[ "$PATH_TO_FILE" != "null" && "$LINE" != "null" ]]; then
-
-                # The path must match exactly as shown in PR diff
-                DISPLAY_PATH="${PATH_TO_FILE#./}"
-
-                echo "Posting Checkov comment → $DISPLAY_PATH:$LINE"
+              if [[ "$FILE_PATH" != "null" && "$LINE" != "null" ]]; then
+                DISPLAY_PATH="${FILE_PATH#./}"
+                echo "Posting Checkov inline comment → $DISPLAY_PATH:$LINE"
 
                 curl -s -X POST \
                   -H "Authorization: Bearer $GH_TOKEN" \
                   -H "Accept: application/vnd.github+json" \
-                  "https://api.github.com/repos/$REPO/pulls/$PR/comments" \
+                  "https://api.github.com/repos/$REPO/pulls/$PR_NUMBER/comments" \
                   -d "{
-                      \"body\": \"$BODY\",
-                      \"commit_id\": \"$COMMIT_ID\",
-                      \"path\": \"$DISPLAY_PATH\",
-                      \"line\": $LINE
+                    \"body\": \"$BODY\",
+                    \"commit_id\": \"$COMMIT_ID\",
+                    \"path\": \"$DISPLAY_PATH\",
+                    \"line\": $LINE
                   }"
               fi
             done
-          else
-            echo "No Checkov failures found."
           fi
 
-      - name: Post Inline PR Comments for Python ARN Violations
+      - name: Post inline PR comments for Python ARN failures
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
-          PR: ${{ github.event.pull_request.number }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
           COMMIT_ID: ${{ github.event.pull_request.head.sha }}
         run: |
-          n=1
-          while IFS= read -r line; do
-            if [[ -n "$line" ]]; then
-              FILE=$(echo "$line" | awk '{print $1}')
-              LINENUM=$(echo "$line" | awk '{print $2}')
-              BODY="Python ARN Check: ${line}"
+          while read -r line; do
+            [[ -z "$line" ]] && continue
 
-              DISPLAY_PATH="${FILE#./}"
+            FILE=$(echo "$line" | awk '{print $1}')
+            LINE=$(echo "$line" | awk '{print $2}')
+            MSG="Python ARN Violation: $line"
 
-              echo "Posting Python ARN comment → $DISPLAY_PATH:$LINENUM"
+            DISPLAY_PATH="${FILE#./}"
 
-              curl -s -X POST \
-                -H "Authorization: Bearer $GH_TOKEN" \
-                -H "Accept: application/vnd.github+json" \
-                "https://api.github.com/repos/$REPO/pulls/$PR/comments" \
-                -d "{
-                  \"body\": \"$BODY\",
-                  \"commit_id\": \"$COMMIT_ID\",
-                  \"path\": \"$DISPLAY_PATH\",
-                  \"line\": $LINENUM
-                }"
-            fi
-          done < pyarn-report.txt
+            echo "Posting ARN inline comment → $DISPLAY_PATH:$LINE"
 
-      # ===================================================================
-      # 🔥 EXACT REPORT OUTPUT STYLE FROM YOUR EXAMPLE WORKFLOW
-      # ===================================================================
-      - name: Generate Security Report
+            curl -s -X POST \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/$REPO/pulls/$PR_NUMBER/comments" \
+              -d "{
+                \"body\": \"$MSG\",
+                \"commit_id\": \"$COMMIT_ID\",
+                \"path\": \"$DISPLAY_PATH\",
+                \"line\": $LINE
+              }"
+
+          done < pyarn_results.txt
+
+
+      # ------------------------------------------------
+      # REPORT OUTPUT EXACTLY LIKE WORKFLOW #2
+      # ------------------------------------------------
+      - name: Generate Report (exact format of workflow #2)
         run: |
           echo "# :shield: Security Scan Report" > report.md
           echo "" >> report.md
 
-          CK_FAILED=$(jq '.results.failed_checks | length' checkov-report.json 2>/dev/null || echo 0)
-          CK_PASSED=$(jq '.results.passed_checks | length' checkov-report.json 2>/dev/null || echo 0)
-          CK_SKIPPED=$(jq '.results.skipped_checks | length' checkov-report.json 2>/dev/null || echo 0)
-          PY_FAILED=$(grep -cve '^\s*$' pyarn-report.txt || echo 0)
+          CK_FAILED=$(jq '.results.failed_checks | length' checkov_results.json 2>/dev/null || echo 0)
+          CK_PASSED=$(jq '.results.passed_checks | length' checkov_results.json 2>/dev/null || echo 0)
+          CK_SKIPPED=$(jq '.results.skipped_checks | length' checkov_results.json 2>/dev/null || echo 0)
+          PY_FAILED=$(grep -cve '^\s*$' pyarn_results.txt || echo 0)
 
           echo "1️⃣ **Checkov Report**" >> report.md
           echo "   - 🟢 **PASSED Checks:** $CK_PASSED" >> report.md
@@ -137,13 +137,12 @@ jobs:
           else
             echo "*⚡️ Every 🔴 is a risk bomb. Defuse before you MERGE!*" >> report.md
           fi
+
           echo "" >> report.md
           echo "---" >> report.md
           echo "" >> report.md
 
           echo "## :cloud: Checkov Detailed Report" >> report.md
-          echo "" >> report.md
-
           if [ "$CK_FAILED" -gt 0 ]; then
             jq -r '
               .results.failed_checks[] |
@@ -154,7 +153,7 @@ jobs:
               "- **Severity:** " + (.severity // "N/A") + "\n" +
               "- **Guideline:** " + (.guideline // "N/A") + "\n" +
               "- **Description:** " + (.description // "No description") + "\n---"
-            ' checkov-report.json >> report.md
+            ' checkov_results.json >> report.md
           else
             echo ":white_check_mark: **No Checkov issues found!**" >> report.md
           fi
@@ -164,21 +163,19 @@ jobs:
           echo "" >> report.md
 
           echo "## :snake: Python ARN Detailed Report" >> report.md
-          echo "" >> report.md
-
           if [ "$PY_FAILED" -gt 0 ]; then
-            while IFS= read -r line; do
+            while read -r line; do
               echo "- $line" >> report.md
-            done < pyarn-report.txt
+            done < pyarn_results.txt
           else
-            echo ":white_check_mark: **No ARN version issues found!**" >> report.md
+            echo ":white_check_mark: **No Python ARN issues found!**" >> report.md
           fi
 
           echo "" >> report.md
           echo "---" >> report.md
-          echo "*Generated automatically by Security Scan Pipeline*" >> report.md
+          echo "*Generated automatically by the Security Scan Pipeline*" >> report.md
 
-      - name: Post Security Scan Summary to PR
+      - name: Post Report to PR
         uses: marocchino/sticky-pull-request-comment@v2
         with:
           path: report.md
