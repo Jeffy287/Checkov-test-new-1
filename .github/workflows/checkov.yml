@@ -1,4 +1,4 @@
-name: Checkov Inline Security Scan
+name: Checkov Custom Policy Inline Scan
 
 on:
   pull_request:
@@ -10,7 +10,7 @@ permissions:
   pull-requests: write
 
 jobs:
-  checkov_inline_scan:
+  checkov_custom:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -26,7 +26,7 @@ jobs:
           pip install checkov
           sudo apt-get update && sudo apt-get install -y jq
 
-      - name: Run Checkov
+      - name: Run Checkov with built-in and custom checks (JSON output)
         run: |
           checkov -d . \
             --external-checks-dir ./custom-policies \
@@ -39,19 +39,24 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           COMMIT_ID: ${{ github.event.pull_request.head.sha }}
         run: |
-          # Print the JSON for debug
           cat checkov_results.json
 
           if [ -f checkov_results.json ] && jq -e '.results.failed_checks | length > 0' checkov_results.json > /dev/null; then
             jq -c '.results.failed_checks[]' checkov_results.json | while read -r issue; do
-              PATH_TO_FILE=$(echo "$issue" | jq -r '.file_path' | sed 's|^\./||')
+              PATH_TO_FILE=$(echo "$issue" | jq -r '.file_path' | sed 's|^/||')
               LINE=$(echo "$issue" | jq -r '.file_line_range[0]')
-              BODY=$(echo "$issue" | jq -r '.check_id + ": " + .check_name + "\n" + (.guideline // "")')
-              # Ensure numbers, not null for line locations
+              CHECK_ID=$(echo "$issue" | jq -r '.check_id')
+              CHECK_NAME=$(echo "$issue" | jq -r '.check_name')
+              GUIDELINE=$(echo "$issue" | jq -r '.guideline')
+              [ "$GUIDELINE" = "null" ] && GUIDELINE="#"
+              BODY="**$CHECK_ID**: $CHECK_NAME\n[Guideline]($GUIDELINE)"
+
+              echo "Prepared comment: File=$PATH_TO_FILE, Line=$LINE, Check=$CHECK_ID, Name=$CHECK_NAME, Guideline=$GUIDELINE"
+
               if [[ -n "$PATH_TO_FILE" && "$PATH_TO_FILE" != "null" && "$PATH_TO_FILE" != "" ]] && \
-                 [[ -n "$LINE" && "$LINE" != "null" && "$LINE" =~ ^[0-9]+$ ]] && \
-                 [[ -n "$BODY" && "$BODY" != "null" ]]; then
-                echo "Posting comment -- File: $PATH_TO_FILE Line: $LINE Body: $BODY"
+                 [[ -n "$LINE" && "$LINE" =~ ^[0-9]+$ ]] && \
+                 [[ -n "$CHECK_ID" && "$CHECK_ID" != "null" ]]; then
+
                 curl -s -X POST \
                   -H "Authorization: Bearer $GITHUB_TOKEN" \
                   -H "Accept: application/vnd.github+json" \
@@ -63,7 +68,7 @@ jobs:
                     \"line\": $LINE
                   }"
               else
-                echo "Skipping (invalid file, line, or body): file=$PATH_TO_FILE line=$LINE body=$BODY"
+                echo "Skipping: file=$PATH_TO_FILE line=$LINE check_id=$CHECK_ID"
               fi
             done
           else
