@@ -40,8 +40,18 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           COMMIT_ID: ${{ github.event.pull_request.head.sha }}
         run: |
-          if [ -f checkov_results.json ] && jq -e '.results.failed_checks | length > 0' checkov_results.json > /dev/null; then
-            jq -c '.results.failed_checks[]' checkov_results.json | while read -r issue; do
+          # Detect if Checkov output is array or object
+          IS_ARRAY=$(jq 'type=="array"' checkov_results.json)
+          if [ "$IS_ARRAY" = "true" ]; then
+            JQ_ROOT='.[].results.failed_checks[]'
+            HAS_FAILS=$(jq 'reduce .[].results.failed_checks[] as $item (0; .+1)' checkov_results.json)
+          else
+            JQ_ROOT='.results.failed_checks[]'
+            HAS_FAILS=$(jq '.results.failed_checks | length' checkov_results.json)
+          fi
+
+          if [ "$HAS_FAILS" -gt 0 ]; then
+            jq -c "$JQ_ROOT" checkov_results.json | while read -r issue; do
               FILE=$(echo "$issue" | jq -r '.file_path' | sed 's|^/||')
               LINE=$(echo "$issue" | jq -r '.file_line_range[0]')
               ID=$(echo "$issue" | jq -r '.check_id')
@@ -54,6 +64,7 @@ jobs:
                  [[ -n "$LINE" && "$LINE" =~ ^[0-9]+$ ]] && \
                  [[ -n "$ID" && "$ID" != "null" ]]; then
 
+                echo "Posting review comment: $MSG on $FILE:$LINE"
                 curl -s -X POST \
                   -H "Authorization: Bearer $GITHUB_TOKEN" \
                   -H "Accept: application/vnd.github+json" \
