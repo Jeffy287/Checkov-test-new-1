@@ -27,19 +27,20 @@ jobs:
           pip install checkov
           sudo apt-get update && sudo apt-get install -y jq
 
-      - name: Run Checkov with built-in and custom checks (JSON)
+      - name: Run Checkov with built-in and custom checks (JSON output)
         run: |
           checkov -d . \
             --external-checks-dir ./custom-policies \
             -o json > checkov-report.json || true
         continue-on-error: true
 
+      # Optionally, run your Python custom check for ARNs (output plain or JSON as you want)
       - name: Run Python ARN version pin check
         run: |
           python check_python_arn_version.py > pyarn_results.txt || true
         continue-on-error: true
 
-      - name: Post inline PR review comments for Checkov failures
+      - name: Post PR review comments for each Checkov failure (as inline/diff comments)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
@@ -50,7 +51,7 @@ jobs:
             jq -c '.results.failed_checks[]' checkov-report.json | while read -r issue; do
               FILE_PATH=$(echo "$issue" | jq -r '.file_path')
               LINE=$(echo "$issue" | jq -r '.file_line_range[0]')
-              BODY=$(echo "$issue" | jq -r '"**" + .check_id + "**: " + .check_name + (if .guideline then "\nGuide: \(.guideline)" else "" end)')
+              BODY=$(echo "$issue" | jq -r '[.check_id, .check_name, .guideline] | join(": ")')
               if [[ -n "$FILE_PATH" && -n "$LINE" && -n "$BODY" ]]; then
                 DISPLAY_PATH="${FILE_PATH#./}"
                 curl -s -L -X POST \
@@ -66,9 +67,10 @@ jobs:
               fi
             done
           else
-            echo "No failed Checkov checks found or report file is missing."
+            echo "No failed Checkov checks found or report file missing."
           fi
 
+      # Optionally, post a green check for no violations found
       - name: Post green check if nothing failed
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
