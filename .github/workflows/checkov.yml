@@ -1,4 +1,4 @@
-name: Checkov Custom Policy Scan
+name: Custom Policy Security Scan
 
 on:
   pull_request:
@@ -10,10 +10,11 @@ permissions:
   pull-requests: write
 
 jobs:
-  checkov_custom:
+  custom-security-scan:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout code
+      - name: Checkout Code
         uses: actions/checkout@v4
 
       - name: Set up Python
@@ -21,57 +22,96 @@ jobs:
         with:
           python-version: '3.9'
 
-      - name: Install Checkov and jq
+      - name: Install Checkov
+        run: pip install checkov
+
+      - name: Run Checkov (built-in and custom checks)
         run: |
-          pip install checkov
-          sudo apt-get update && sudo apt-get install -y jq
+          checkov -d . \
+            --external-checks-dir ./custom-policies \
+            -o json > checkov-report.json || true
 
-      - name: Run Checkov with custom and built-in policies
+      - name: Run Python ARN version pin check
         run: |
-          checkov -d . --external-checks-dir ./custom-policies -o json > checkov-results.json || true
+          python check_python_arn_version.py --output-json pyarn-report.json || true
 
-      - name: Print Checkov failing checks for debugging
+      - name: Format Reports
         run: |
-          jq '.results.failed_checks[] | {file: .file_path, lines: .file_line_range, id: .check_id, name: .check_name}' checkov-results.json || echo "No failed checks"
+          echo "# :shield: Custom Policy Security Scan Report" > report.md
+          echo "" >> report.md
 
-      - name: Post Checkov failures as inline code review comments
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          COMMIT_ID: ${{ github.event.pull_request.head.sha }}
-        run: |
-          jq -c '.results.failed_checks[]' checkov-results.json | while read -r issue; do
-            # Extract and clean up necessary fields
-            PATH_TO_FILE=$(echo "$issue" | jq -r '.file_path' | sed 's|^\./||')
-            LINE=$(echo "$issue" | jq -r '.file_line_range[0]')
-            CHECK_ID=$(echo "$issue" | jq -r '.check_id')
-            CHECK_NAME=$(echo "$issue" | jq -r '.check_name')
-            RESOURCE=$(echo "$issue" | jq -r '.resource // "N/A"')
-            GUIDELINE=$(echo "$issue" | jq -r '.guideline // "N/A"')
-            BODY="**Checkov $CHECK_ID**: $CHECK_NAME\nResource: $RESOURCE\n[Guideline]($GUIDELINE)"
+          # Checkov Results
+          CHECKOV_JSON="checkov-report.json"
+          CHECKOV_PASSED=$(jq '.summary.passed' "$CHECKOV_JSON" 2>/dev/null || echo "0")
+          CHECKOV_FAILED=$(jq '.summary.failed' "$CHECKOV_JSON" 2>/dev/null || echo "0")
+          CHECKOV_SKIPPED=$(jq '.summary.skipped' "$CHECKOV_JSON" 2>/dev/null || echo "0")
+          
+          echo "## 1️⃣ Checkov Report" >> report.md
+          echo "- 🟢 **PASSED Checks:** $CHECKOV_PASSED" >> report.md
+          echo "- 🔴 **FAILED Checks:** $CHECKOV_FAILED" >> report.md
+          echo "- ⚠️  **SKIPPED Checks:** $CHECKOV_SKIPPED" >> report.md
+          echo "" >> report.md
 
-            echo "DEBUG: PATH_TO_FILE=$PATH_TO_FILE, LINE=$LINE, CHECK_ID=$CHECK_ID, COMMIT_ID=$COMMIT_ID"
-            
-            # Optional: check if file exists in repo (can comment this out in prod)
-            if [[ ! -f "$PATH_TO_FILE" ]]; then
-              echo "WARNING: File $PATH_TO_FILE does not exist in workspace."
-            fi
-
-            # GitHub inline review comments require all fields present
-            if [[ -n "$PATH_TO_FILE" && -n "$LINE" && -n "$BODY" && -n "$COMMIT_ID" ]]; then
-              RESPONSE=$(curl -s -o response.json -w "%{http_code}" -X POST \
-                -H "Authorization: Bearer $GITHUB_TOKEN" \
-                -H "Accept: application/vnd.github.v3+json" \
-                "https://api.github.com/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/comments" \
-                -d "{\"body\": \"$BODY\", \"commit_id\": \"$COMMIT_ID\", \"path\": \"$PATH_TO_FILE\", \"line\": $LINE, \"side\": \"RIGHT\"}")
-              cat response.json
-              echo "HTTP response code: $RESPONSE"
-              if [[ "$RESPONSE" != "201" ]]; then
-                echo "Failed to create PR comment for $PATH_TO_FILE:$LINE (HTTP $RESPONSE)"
-                cat response.json
-              fi
+          # Detailed Checkov Failures
+          echo "### :cloud: Checkov Detailed Failures" >> report.md
+          if [ -f "$CHECKOV_JSON" ]; then
+            FAILED=$(jq '.results.failed_checks | length' "$CHECKOV_JSON" 2>/dev/null || echo "0")
+            if [ "$FAILED" -gt 0 ]; then
+              jq -r '
+                .results.failed_checks[]? |
+                "- **" + (.check_id // "N/A") + ":** " + (.check_name // "N/A") + "\n" +
+                (
+                  if (.file_path // "") != "" and
+                     ((.file_line_range | type) == "array" and (.file_line_range | length) > 0)
+                  then
+                    "  - **Location:** `" + (.file_path | ltrimstr("/")) + ":" + ((.file_line_range[0]|tostring) // "?") + "`\n"
+                  elif .resource_address then
+                    "  - **Resource:** `" + .resource_address + "`\n"
+                  else "" end
+                ) +
+                "  - **Severity:** " + ((.severity // "N/A")) + "\n" +
+                "  - **Guideline:** " + ((.guideline // "N/A")) + "\n" +
+                "  - **Description:** " + ((.description // .check_name // "No description provided.")) + "\n"
+              ' "$CHECKOV_JSON" >> report.md
             else
-              echo "Skipping comment for $PATH_TO_FILE:$LINE due to missing info."
+              echo ":white_check_mark: **No failed infrastructure checks found!**" >> report.md
             fi
-          done
+          else
+            echo ":warning: Checkov report not generated." >> report.md
+          fi
+
+          echo "" >> report.md
+          echo "---" >> report.md
+
+          # Python ARN Report
+          echo "## 2️⃣ Python ARN Version Scan" >> report.md
+          PYARN_JSON="pyarn-report.json"
+          PYARN_FAILED=$(jq '.failures | length' "$PYARN_JSON" 2>/dev/null || echo "0")
+          echo "- 🔴 **FAILED Checks:** $PYARN_FAILED" >> report.md
+          echo "" >> report.md
+
+          # Detailed Python ARN Failures
+          if [ -f "$PYARN_JSON" ]; then
+            COUNT=$(jq '.failures | length' "$PYARN_JSON" 2>/dev/null || echo "0")
+            if [ "$COUNT" -gt 0 ]; then
+              jq -r '
+                .failures[] |
+                "- **File:** " + (.file // "N/A") + "\n" +
+                "  - **Line:** " + ((.line | tostring) // "?") + "\n" +
+                "  - **Issue:** " + (.issue // "N/A") + "\n"
+              ' "$PYARN_JSON" >> report.md
+            else
+              echo ":white_check_mark: **No Python ARN issues found!**" >> report.md
+            fi
+          else
+            echo ":warning: Python ARN report not generated." >> report.md
+          fi
+
+          echo "" >> report.md
+          echo "---" >> report.md
+          echo "*This report was generated automatically by the Custom Policy Security Scan Pipeline*" >> report.md
+
+      - name: Post Scan Summary to PR
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          path: report.md
