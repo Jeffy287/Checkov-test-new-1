@@ -12,7 +12,6 @@ permissions:
 jobs:
   checkov_custom:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -20,7 +19,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.9"
+          python-version: '3.9'
 
       - name: Install Checkov
         run: pip install checkov
@@ -28,154 +27,80 @@ jobs:
       - name: Install GitHub CLI
         run: sudo apt-get install gh
 
-      # ------------------------------------------------
-      # RUN YOUR SCANS (same as workflow 1)
-      # ------------------------------------------------
-      - name: Run Checkov scan (with custom policies)
+      - name: Run Checkov with built-in and custom checks
         run: |
           checkov -d . \
             --external-checks-dir ./custom-policies \
-            -o json > checkov_results.json || true
+            --quiet > checkov_results.txt || true
+        continue-on-error: true
 
       - name: Run Python ARN version pin check
         run: |
           python check_python_arn_version.py > pyarn_results.txt || true
+        continue-on-error: true
 
-
-      # ------------------------------------------------
-      # INLINE PR COMMENTS (same logic as your workflow #2)
-      # ------------------------------------------------
-      - name: Post inline PR comments for Checkov failures
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          COMMIT_ID: ${{ github.event.pull_request.head.sha }}
+      - name: Split Built-in Policy Failures
         run: |
-          if jq -e '.results.failed_checks | length > 0' checkov_results.json >/dev/null; then
-            jq -c '.results.failed_checks[]' checkov_results.json | while read -r issue; do
+          awk '
+            BEGIN {block="";n=0}
+            /^Check: / && !/CKV_AWS_CUSTOM_001/ {
+              if(block) { n++; print block > ("builtin_error_block_" n ".txt"); block="" }
+              block=$0"\n"; next
+            }
+            /^Check: / { if(block) { n++; print block > ("builtin_error_block_" n ".txt"); block="" } }
+            { block=block $0 "\n" }
+            END { if(block) { n++; print block > ("builtin_error_block_" n ".txt") } }
+          ' checkov_results.txt
 
-              FILE_PATH=$(echo "$issue" | jq -r '.file_path')
-              LINE=$(echo "$issue" | jq -r '.file_line_range[0]')
-              BODY=$(echo "$issue" | jq -r '.check_id + ": " + .check_name')
-
-              if [[ "$FILE_PATH" != "null" && "$LINE" != "null" ]]; then
-                DISPLAY_PATH="${FILE_PATH#./}"
-                echo "Posting Checkov inline comment → $DISPLAY_PATH:$LINE"
-
-                curl -s -X POST \
-                  -H "Authorization: Bearer $GH_TOKEN" \
-                  -H "Accept: application/vnd.github+json" \
-                  "https://api.github.com/repos/$REPO/pulls/$PR_NUMBER/comments" \
-                  -d "{
-                    \"body\": \"$BODY\",
-                    \"commit_id\": \"$COMMIT_ID\",
-                    \"path\": \"$DISPLAY_PATH\",
-                    \"line\": $LINE
-                  }"
-              fi
-            done
-          fi
-
-      - name: Post inline PR comments for Python ARN failures
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          COMMIT_ID: ${{ github.event.pull_request.head.sha }}
+      - name: Split Custom Policy Failures
         run: |
-          while read -r line; do
-            [[ -z "$line" ]] && continue
+          awk '
+            BEGIN {block="";n=0}
+            /^Check: CKV_AWS_CUSTOM_001/ {
+              if(block) { n++; print block > ("custom_error_block_" n ".txt"); block="" }
+              block=$0"\n"; next
+            }
+            /^Check: / { if(block) { n++; print block > ("custom_error_block_" n ".txt"); block="" } }
+            { block=block $0 "\n" }
+            END { if(block) { n++; print block > ("custom_error_block_" n ".txt") } }
+          ' checkov_results.txt
 
-            FILE=$(echo "$line" | awk '{print $1}')
-            LINE=$(echo "$line" | awk '{print $2}')
-            MSG="Python ARN Violation: $line"
-
-            DISPLAY_PATH="${FILE#./}"
-
-            echo "Posting ARN inline comment → $DISPLAY_PATH:$LINE"
-
-            curl -s -X POST \
-              -H "Authorization: Bearer $GH_TOKEN" \
-              -H "Accept: application/vnd.github+json" \
-              "https://api.github.com/repos/$REPO/pulls/$PR_NUMBER/comments" \
-              -d "{
-                \"body\": \"$MSG\",
-                \"commit_id\": \"$COMMIT_ID\",
-                \"path\": \"$DISPLAY_PATH\",
-                \"line\": $LINE
-              }"
-
+      - name: Split Python File Violations
+        run: |
+          n=0
+          while IFS= read -r line; do
+            if [ -n "$line" ] && [[ ! "$line" =~ ^[[:space:]]*$ ]]; then
+              n=$((n+1))
+              echo "$line" > "pyarn_error_block_$n.txt"
+            fi
           done < pyarn_results.txt
 
-
-      # ------------------------------------------------
-      # REPORT OUTPUT EXACTLY LIKE WORKFLOW #2
-      # ------------------------------------------------
-      - name: Generate Report (exact format of workflow #2)
+      - name: Post each built-in error as PR comment
         run: |
-          echo "# :shield: Security Scan Report" > report.md
-          echo "" >> report.md
+          for file in builtin_error_block_*.txt; do
+            if [ -s "$file" ] && grep -q '[^[:space:]]' "$file"; then
+              gh pr comment ${{ github.event.pull_request.number }} --body-file "$file"
+            fi
+          done
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-          CK_FAILED=$(jq '.results.failed_checks | length' checkov_results.json 2>/dev/null || echo 0)
-          CK_PASSED=$(jq '.results.passed_checks | length' checkov_results.json 2>/dev/null || echo 0)
-          CK_SKIPPED=$(jq '.results.skipped_checks | length' checkov_results.json 2>/dev/null || echo 0)
-          PY_FAILED=$(grep -cve '^\s*$' pyarn_results.txt || echo 0)
+      - name: Post each custom error as PR comment
+        run: |
+          for file in custom_error_block_*.txt; do
+            if [ -s "$file" ] && grep -q '[^[:space:]]' "$file"; then
+              gh pr comment ${{ github.event.pull_request.number }} --body-file "$file"
+            fi
+          done
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-          echo "1️⃣ **Checkov Report**" >> report.md
-          echo "   - 🟢 **PASSED Checks:** $CK_PASSED" >> report.md
-          echo "   - 🔴 **FAILED Checks:** $CK_FAILED" >> report.md
-          echo "   - ⚠️ **SKIPPED Checks:** $CK_SKIPPED" >> report.md
-          echo "" >> report.md
-
-          echo "2️⃣ **Python ARN Version Check**" >> report.md
-          echo "   - 🔴 **Violations:** $PY_FAILED" >> report.md
-          echo "" >> report.md
-
-          if [ "$CK_FAILED" -eq 0 ] && [ "$PY_FAILED" -eq 0 ]; then
-            echo ":white_check_mark: Everything looks secure. Great job! 🔐" >> report.md
-          else
-            echo "*⚡️ Every 🔴 is a risk bomb. Defuse before you MERGE!*" >> report.md
-          fi
-
-          echo "" >> report.md
-          echo "---" >> report.md
-          echo "" >> report.md
-
-          echo "## :cloud: Checkov Detailed Report" >> report.md
-          if [ "$CK_FAILED" -gt 0 ]; then
-            jq -r '
-              .results.failed_checks[] |
-              "### " + .check_id + "\n" +
-              "- **Name:** " + .check_name + "\n" +
-              "- **File:** `" + .file_path + "`" + "\n" +
-              "- **Line:** " + (.file_line_range[0] | tostring) + "\n" +
-              "- **Severity:** " + (.severity // "N/A") + "\n" +
-              "- **Guideline:** " + (.guideline // "N/A") + "\n" +
-              "- **Description:** " + (.description // "No description") + "\n---"
-            ' checkov_results.json >> report.md
-          else
-            echo ":white_check_mark: **No Checkov issues found!**" >> report.md
-          fi
-
-          echo "" >> report.md
-          echo "---" >> report.md
-          echo "" >> report.md
-
-          echo "## :snake: Python ARN Detailed Report" >> report.md
-          if [ "$PY_FAILED" -gt 0 ]; then
-            while read -r line; do
-              echo "- $line" >> report.md
-            done < pyarn_results.txt
-          else
-            echo ":white_check_mark: **No Python ARN issues found!**" >> report.md
-          fi
-
-          echo "" >> report.md
-          echo "---" >> report.md
-          echo "*Generated automatically by the Security Scan Pipeline*" >> report.md
-
-      - name: Post Report to PR
-        uses: marocchino/sticky-pull-request-comment@v2
-        with:
-          path: report.md
+      - name: Post each Python violation as PR comment
+        run: |
+          for file in pyarn_error_block_*.txt; do
+            if [ -s "$file" ] && grep -q '[^[:space:]]' "$file"; then
+              gh pr comment ${{ github.event.pull_request.number }} --body-file "$file"
+            fi
+          done
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
