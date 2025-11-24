@@ -1,16 +1,13 @@
 name: Checkov Custom Policy Scan
 
-
 on:
   pull_request:
     branches:
       - main
 
-
 permissions:
   contents: read
   pull-requests: write
-
 
 jobs:
   checkov_custom:
@@ -19,16 +16,13 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.9'
 
-
       - name: Install Checkov
         run: pip install checkov
-
 
       - name: Run Checkov with built-in and custom checks
         run: |
@@ -37,63 +31,84 @@ jobs:
             --quiet > checkov_results.txt || true
         continue-on-error: true
 
-
       - name: Run Python ARN version pin check
         run: |
           python check_python_arn_version.py > pyarn_results.txt || true
         continue-on-error: true
 
-
-      - name: Combine scan results (grouped output)
+      - name: Build markdown report
         run: |
-          echo "### Policy Violations and Version-pinned ARNs Detected" > pr_arn_report.md
+          #!/bin/bash
+          echo "# :shield: Policy & Python ARN Scan Report" > pr_arn_report.md
+          echo "" >> pr_arn_report.md
 
+          # Result counts
+          FAILED_POLICIES=$(grep -c 'Check: ' checkov_results.txt)
+          BUILTIN_FAILED=$(awk '/^Check: / && $0 !~ /CKV_AWS_CUSTOM_001/ {c++} END{print c+0}' checkov_results.txt)
+          CUSTOM_FAILED=$(awk '/^Check: CKV_AWS_CUSTOM_001/ {c++} END{print c+0}' checkov_results.txt)
+          PYARN_VIOLATIONS=$(grep -c . pyarn_results.txt)
 
-          # Built-in policies (everything except CKV_AWS_CUSTOM_001)
+          # Results summary
+          echo "1️⃣ **Checkov Built-in Policy Violations**" >> pr_arn_report.md
+          echo "- 🔴 **Count:** $BUILTIN_FAILED" >> pr_arn_report.md
+          echo "" >> pr_arn_report.md
+          echo "2️⃣ **Checkov Custom Policy Violations**" >> pr_arn_report.md
+          echo "- 🔴 **Count:** $CUSTOM_FAILED" >> pr_arn_report.md
+          echo "" >> pr_arn_report.md
+          echo "3️⃣ **Python ARN Version Pin Violations**" >> pr_arn_report.md
+          echo "- 🔴 **Count:** $PYARN_VIOLATIONS" >> pr_arn_report.md
+          echo "" >> pr_arn_report.md
+
+          if [[ "$BUILTIN_FAILED" -eq 0 && "$CUSTOM_FAILED" -eq 0 && "$PYARN_VIOLATIONS" -eq 0 ]]; then
+            echo ":white_check_mark: Everything looks secure. Great job! 🔐" >> pr_arn_report.md
+          else
+            echo "*⚡️ Every 🔴 is a risk bomb. Defuse before you MERGE!*" >> pr_arn_report.md
+          fi
+
+          echo "---" >> pr_arn_report.md
+          echo "" >> pr_arn_report.md
+
+          # Detailed built-in failures
+          echo "## :cloud: Checkov Built-in Policy Failures" >> pr_arn_report.md
           awk '
           BEGIN {in_block=0}
-          /^Check: / {if(in_block){print block}; block=""; in_block=0}
+          /^Check: / {if(in_block && block!~/CKV_AWS_CUSTOM_001/){print block}; block=""; in_block=0}
           /^Check: / && !/CKV_AWS_CUSTOM_001/ {block=$0"\n"; in_block=1; next}
           in_block==1 {block=block $0 "\n"}
-          END{if(in_block){print block}}
-          ' checkov_results.txt > builtin_blocks.txt
-          if [ -s builtin_blocks.txt ]; then
-            echo -e "\n#### Terraform/Checkov Built-in Policy Failures\n\`\`\`" >> pr_arn_report.md
-            cat builtin_blocks.txt >> pr_arn_report.md
-            echo -e "\n\`\`\`" >> pr_arn_report.md
+          END{if(in_block && block!~/CKV_AWS_CUSTOM_001/){print block}}
+          ' checkov_results.txt >> pr_arn_report.md
+          if [[ "$BUILTIN_FAILED" -eq 0 ]]; then
+            echo ":white_check_mark: **No failed built-in policy checks found!**" >> pr_arn_report.md
           fi
+          echo "" >> pr_arn_report.md
 
-
-          # Custom CKV_AWS_CUSTOM_001 policies only
+          # Detailed custom failures
+          echo "## :wrench: Checkov Custom Policy Failures" >> pr_arn_report.md
           awk '
           BEGIN {in_block=0}
-          /^Check: / {if(in_block){print block}; block=""; in_block=0}
+          /^Check: / {if(in_block && block~/CKV_AWS_CUSTOM_001/){print block}; block=""; in_block=0}
           /^Check: CKV_AWS_CUSTOM_001/ {block=$0"\n"; in_block=1; next}
           in_block==1 {block=block $0 "\n"}
-          END{if(in_block){print block}}
-          ' checkov_results.txt > custom_blocks.txt
-          if [ -s custom_blocks.txt ]; then
-            echo -e "\n#### Terraform/Checkov Custom Policy Failures\n\`\`\`" >> pr_arn_report.md
-            cat custom_blocks.txt >> pr_arn_report.md
-            echo -e "\n\`\`\`" >> pr_arn_report.md
+          END{if(in_block && block~/CKV_AWS_CUSTOM_001/){print block}}
+          ' checkov_results.txt >> pr_arn_report.md
+          if [[ "$CUSTOM_FAILED" -eq 0 ]]; then
+            echo ":white_check_mark: **No failed custom policy checks found!**" >> pr_arn_report.md
           fi
+          echo "" >> pr_arn_report.md
 
-
-          # Python file violations
+          # Python violations
+          echo "## :snake: Python File Violations" >> pr_arn_report.md
           if [ -s pyarn_results.txt ]; then
-            echo -e "\n#### Python File Violations\n\`\`\`\n$(cat pyarn_results.txt)\n\`\`\`" >> pr_arn_report.md
+            echo '```
+            cat pyarn_results.txt >> pr_arn_report.md
+            echo '```' >> pr_arn_report.md
+          else
+            echo ":white_check_mark: **No Python ARN issues found!**" >> pr_arn_report.md
           fi
 
-
-          # Print green check if no fails
-          FOUND=0
-          if grep -q "FAILED" pr_arn_report.md || [ -s pyarn_results.txt ]; then
-            FOUND=1
-          fi
-          if [ $FOUND -eq 0 ]; then
-            echo -e "No policy violations or version-pinned ARNs were found! :white_check_mark:" > pr_arn_report.md
-          fi
-
+          echo "" >> pr_arn_report.md
+          echo "---" >> pr_arn_report.md
+          echo "*This report was generated automatically by the Custom Policy Scan Pipeline*" >> pr_arn_report.md
 
       - name: Comment scan results in PR
         uses: marocchino/sticky-pull-request-comment@v2
