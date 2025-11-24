@@ -21,10 +21,10 @@ jobs:
         with:
           python-version: '3.9'
 
-      - name: Install Checkov and jq
+      - name: Install Checkov, jq, and GitHub CLI
         run: |
           pip install checkov
-          sudo apt-get update && sudo apt-get install -y jq
+          sudo apt-get update && sudo apt-get install -y jq gh
 
       - name: Run Checkov scan (JSON output)
         run: |
@@ -33,14 +33,20 @@ jobs:
             --quiet -o json > checkov_results.json || true
         continue-on-error: true
 
-      - name: Post Checkov review comments with Reply button
+      - name: Cache PR diff file list
+        id: pr_diff
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          gh pr diff $PR_NUMBER --name-only | sed 's|^./||' > changed_files.txt
+
+      - name: Post Checkov review comments with Reply button (only on changed files)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           COMMIT_ID: ${{ github.event.pull_request.head.sha }}
         run: |
-          # Detect if Checkov output is array or object
           IS_ARRAY=$(jq 'type=="array"' checkov_results.json)
           if [ "$IS_ARRAY" = "true" ]; then
             JQ_ROOT='.[].results.failed_checks[]'
@@ -60,23 +66,28 @@ jobs:
               [ "$GUIDE" = "null" ] && GUIDE="#"
               MSG="**$ID**: $NAME\n[Guideline]($GUIDE)"
 
-              if [[ -n "$FILE" && "$FILE" != "null" && "$FILE" != "" ]] && \
-                 [[ -n "$LINE" && "$LINE" =~ ^[0-9]+$ ]] && \
-                 [[ -n "$ID" && "$ID" != "null" ]]; then
+              # Only comment if file is in changed_files.txt
+              if grep -qx "$FILE" changed_files.txt; then
+                if [[ -n "$FILE" && "$FILE" != "null" && "$FILE" != "" ]] && \
+                   [[ -n "$LINE" && "$LINE" =~ ^[0-9]+$ ]] && \
+                   [[ -n "$ID" && "$ID" != "null" ]]; then
 
-                echo "Posting review comment: $MSG on $FILE:$LINE"
-                curl -s -X POST \
-                  -H "Authorization: Bearer $GITHUB_TOKEN" \
-                  -H "Accept: application/vnd.github+json" \
-                  "https://api.github.com/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/comments" \
-                  -d "{
-                    \"body\": \"$MSG\",
-                    \"commit_id\": \"$COMMIT_ID\",
-                    \"path\": \"$FILE\",
-                    \"line\": $LINE
-                  }"
+                  echo "Posting review comment: $MSG on $FILE:$LINE"
+                  curl -s -X POST \
+                    -H "Authorization: Bearer $GITHUB_TOKEN" \
+                    -H "Accept: application/vnd.github+json" \
+                    "https://api.github.com/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/comments" \
+                    -d "{
+                      \"body\": \"$MSG\",
+                      \"commit_id\": \"$COMMIT_ID\",
+                      \"path\": \"$FILE\",
+                      \"line\": $LINE
+                    }"
+                else
+                  echo "Skipping error due to invalid path/line/fields: file=$FILE line=$LINE check_id=$ID"
+                fi
               else
-                echo "Skipping error due to invalid path/line/fields: file=$FILE line=$LINE check_id=$ID"
+                echo "Skipping $FILE (not in PR diff)"
               fi
             done
           else
