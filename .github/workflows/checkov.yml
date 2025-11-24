@@ -42,13 +42,12 @@ jobs:
           echo "# :shield: Policy & Python ARN Scan Report" > pr_arn_report.md
           echo "" >> pr_arn_report.md
 
-          # Result counts
-          FAILED_POLICIES=$(grep -c 'Check: ' checkov_results.txt)
+          # Count results
           BUILTIN_FAILED=$(awk '/^Check: / && $0 !~ /CKV_AWS_CUSTOM_001/ {c++} END{print c+0}' checkov_results.txt)
           CUSTOM_FAILED=$(awk '/^Check: CKV_AWS_CUSTOM_001/ {c++} END{print c+0}' checkov_results.txt)
           PYARN_VIOLATIONS=$(grep -c . pyarn_results.txt)
 
-          # Results summary
+          # Summary
           echo "1️⃣ **Checkov Built-in Policy Violations**" >> pr_arn_report.md
           echo "- 🔴 **Count:** $BUILTIN_FAILED" >> pr_arn_report.md
           echo "" >> pr_arn_report.md
@@ -68,7 +67,7 @@ jobs:
           echo "---" >> pr_arn_report.md
           echo "" >> pr_arn_report.md
 
-          # Detailed built-in failures
+          # Details for built-in
           echo "## :cloud: Checkov Built-in Policy Failures" >> pr_arn_report.md
           awk '
           BEGIN {in_block=0}
@@ -82,7 +81,7 @@ jobs:
           fi
           echo "" >> pr_arn_report.md
 
-          # Detailed custom failures
+          # Details for custom
           echo "## :wrench: Checkov Custom Policy Failures" >> pr_arn_report.md
           awk '
           BEGIN {in_block=0}
@@ -99,9 +98,9 @@ jobs:
           # Python violations
           echo "## :snake: Python File Violations" >> pr_arn_report.md
           if [ -s pyarn_results.txt ]; then
-            echo '```
+            echo "```
             cat pyarn_results.txt >> pr_arn_report.md
-            echo '```' >> pr_arn_report.md
+            echo "```" >> pr_arn_report.md
           else
             echo ":white_check_mark: **No Python ARN issues found!**" >> pr_arn_report.md
           fi
