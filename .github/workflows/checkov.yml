@@ -24,19 +24,18 @@ jobs:
       - name: Install Checkov
         run: pip install checkov
 
-      - name: Run Checkov with custom policies
-        run: |
+      - name: Run Checkov (built-in and custom policies)
+        run: |  # Output JSON so we can reliably parse
           checkov -d . \
             --external-checks-dir ./custom-policies \
             --output json > checkov_results.json || true
         continue-on-error: true
 
-      - name: Run Python check
+      - name: Run Python ARN version pin check
         run: |
           python check_python_arn_version.py > pyarn_results.txt || true
         continue-on-error: true
 
-      # Extract Checkov failures to error files using jq (for JSON output)
       - name: Split Checkov Failures to Files
         run: |
           mkdir -p checkov_errors
@@ -44,18 +43,19 @@ jobs:
           while read -r issue; do
             file=$(echo "$issue" | jq -r '.file_path')
             line=$(echo "$issue" | jq -r '.file_line_range[0]')
-            body=$(echo "$issue" | jq -r '"[" + .check_id + "] " + .check_name + "\n" + (.resource || "") + "\n" + .guideline')
-            out="checkov_errors/$(echo $file | tr '/' '_')_${line}.txt"
-            echo "$file" > "$out"
-            echo "$line" >> "$out"
-            echo "$body" >> "$out"
+            body=$(echo "$issue" | jq -r '"[" + .check_id + "] " + .check_name + "\n" + (.resource // "") + "\n" + .guideline')
+            # Only create file if all required data is present
+            if [[ -n "$file" && -n "$line" && -n "$body" ]]; then
+              out="checkov_errors/$(echo $file | tr '/' '_')_${line}.txt"
+              echo "$file" > "$out"
+              echo "$line" >> "$out"
+              echo "$body" >> "$out"
+            fi
           done
 
-      # Example Python output splitting: assumes format filename:line_number:message
       - name: Split Python Failures to Files
         run: |
           mkdir -p pyarn_errors
-          n=0
           while IFS= read -r line; do
             filename=$(echo "$line" | cut -d: -f1)
             linenum=$(echo "$line" | cut -d: -f2)
@@ -68,7 +68,6 @@ jobs:
             fi
           done < pyarn_results.txt
 
-      # Post Checkov failures as review comments
       - name: Post Checkov Review Comments
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -76,25 +75,28 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           COMMIT_ID: ${{ github.event.pull_request.head.sha }}
         run: |
-          for file in checkov_errors/*.txt; do
-            PATH_TO_FILE=$(head -n1 "$file")
-            LINE=$(sed -n '2p' "$file")
-            BODY=$(tail -n +3 "$file" | tr '\n' ' ')
-            if [[ -n "$PATH_TO_FILE" && -n "$LINE" && -n "$BODY" ]]; then
-              curl -L -X POST \
-                -H "Authorization: Bearer $GITHUB_TOKEN" \
-                -H "Accept: application/vnd.github+json" \
-                "https://api.github.com/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/comments" \
-                -d "{
-                  \"body\": \"$BODY\",
-                  \"commit_id\": \"$COMMIT_ID\",
-                  \"path\": \"$PATH_TO_FILE\",
-                  \"line\": $LINE
-                }"
-            fi
-          done
+          if ls checkov_errors/*.txt 1> /dev/null 2>&1; then
+            for file in checkov_errors/*.txt; do
+              PATH_TO_FILE=$(head -n1 "$file")
+              LINE=$(sed -n '2p' "$file")
+              BODY=$(tail -n +3 "$file" | tr '\n' ' ')
+              if [[ -n "$PATH_TO_FILE" && -n "$LINE" && -n "$BODY" ]]; then
+                curl -L -X POST \
+                  -H "Authorization: Bearer $GITHUB_TOKEN" \
+                  -H "Accept: application/vnd.github+json" \
+                  "https://api.github.com/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/comments" \
+                  -d "{
+                    \"body\": \"$BODY\",
+                    \"commit_id\": \"$COMMIT_ID\",
+                    \"path\": \"$PATH_TO_FILE\",
+                    \"line\": $LINE
+                  }"
+              fi
+            done
+          else
+            echo "No Checkov errors found to report."
+          fi
 
-      # Post Python failures as review comments
       - name: Post Python Review Comments
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -102,20 +104,24 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           COMMIT_ID: ${{ github.event.pull_request.head.sha }}
         run: |
-          for file in pyarn_errors/*.txt; do
-            PATH_TO_FILE=$(head -n1 "$file")
-            LINE=$(sed -n '2p' "$file")
-            BODY=$(tail -n +3 "$file" | tr '\n' ' ')
-            if [[ -n "$PATH_TO_FILE" && -n "$LINE" && -n "$BODY" ]]; then
-              curl -L -X POST \
-                -H "Authorization: Bearer $GITHUB_TOKEN" \
-                -H "Accept: application/vnd.github+json" \
-                "https://api.github.com/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/comments" \
-                -d "{
-                  \"body\": \"$BODY\",
-                  \"commit_id\": \"$COMMIT_ID\",
-                  \"path\": \"$PATH_TO_FILE\",
-                  \"line\": $LINE
-                }"
-            fi
-          done
+          if ls pyarn_errors/*.txt 1> /dev/null 2>&1; then
+            for file in pyarn_errors/*.txt; do
+              PATH_TO_FILE=$(head -n1 "$file")
+              LINE=$(sed -n '2p' "$file")
+              BODY=$(tail -n +3 "$file" | tr '\n' ' ')
+              if [[ -n "$PATH_TO_FILE" && -n "$LINE" && -n "$BODY" ]]; then
+                curl -L -X POST \
+                  -H "Authorization: Bearer $GITHUB_TOKEN" \
+                  -H "Accept: application/vnd.github+json" \
+                  "https://api.github.com/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/comments" \
+                  -d "{
+                    \"body\": \"$BODY\",
+                    \"commit_id\": \"$COMMIT_ID\",
+                    \"path\": \"$PATH_TO_FILE\",
+                    \"line\": $LINE
+                  }"
+              fi
+            done
+          else
+            echo "No Python ARN errors found to report."
+          fi
