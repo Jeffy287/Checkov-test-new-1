@@ -79,6 +79,7 @@ jobs:
         run: |
           for file in builtin_error_block_*.txt; do
             if [ -s "$file" ] && grep -q '[^[:space:]]' "$file"; then
+              echo -e "\n---\n**Add a comment**\nComment  \nAdd your comment here...  \n[Markdown Syntax Help](https://docs.github.com/github/writing-on-github/getting-started-with-writing-and-formatting-on-github/basic-writing-and-formatting-syntax)" >> "$file"
               gh pr comment ${{ github.event.pull_request.number }} --body-file "$file"
             fi
           done
@@ -89,6 +90,7 @@ jobs:
         run: |
           for file in custom_error_block_*.txt; do
             if [ -s "$file" ] && grep -q '[^[:space:]]' "$file"; then
+              echo -e "\n---\n**Add a comment**\nComment  \nAdd your comment here...  \n[Markdown Syntax Help](https://docs.github.com/github/writing-on-github/getting-started-with-writing-and-formatting-on-github/basic-writing-and-formatting-syntax)" >> "$file"
               gh pr comment ${{ github.event.pull_request.number }} --body-file "$file"
             fi
           done
@@ -99,6 +101,7 @@ jobs:
         run: |
           for file in pyarn_error_block_*.txt; do
             if [ -s "$file" ] && grep -q '[^[:space:]]' "$file"; then
+              echo -e "\n---\n**Add a comment**\nComment  \nAdd your comment here...  \n[Markdown Syntax Help](https://docs.github.com/github/writing-on-github/getting-started-with-writing-and-formatting-on-github/basic-writing-and-formatting-syntax)" >> "$file"
               gh pr comment ${{ github.event.pull_request.number }} --body-file "$file"
             fi
           done
