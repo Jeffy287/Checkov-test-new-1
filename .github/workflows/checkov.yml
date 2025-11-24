@@ -1,18 +1,23 @@
-name: Checkov Custom Policy Inline Review
+name: Checkov and Python Scan
 
 on:
   pull_request:
-    branches: [main]
+    types: [opened, synchronize, reopened]
 
 permissions:
   contents: read
   pull-requests: write
+  id-token: write
 
 jobs:
-  checkov_custom:
+  security-scan:
+    if: |
+      (startsWith(github.head_ref, 'feature/') && github.base_ref == 'develop') ||
+      (github.head_ref == 'develop' && github.base_ref == 'stage') ||
+      (github.head_ref == 'stage' && github.base_ref == 'main')
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
+      - name: Checkout Code
         uses: actions/checkout@v4
 
       - name: Set up Python environment
@@ -25,11 +30,29 @@ jobs:
           pip install checkov
           sudo apt-get update && sudo apt-get install -y jq gh
 
-      - name: Run Checkov (JSON output)
-        run: |
-          checkov -d . --external-checks-dir ./custom-policies --quiet -o json > checkov_results.json || true
+      # -- INFRA SCAN --
+      - name: Terraform Init (if using Terraform; remove if not needed)
+        run: terraform init || true
         continue-on-error: true
 
+      - name: Terraform Plan
+        run: terraform plan -out=tfplan.binary || true
+        continue-on-error: true
+
+      - name: Convert Plan to JSON
+        run: terraform show -json tfplan.binary > tfplan.json || true
+        continue-on-error: true
+
+      - name: Run Checkov on Plan
+        run: |
+          if [ -f tfplan.json ]; then
+            checkov -f tfplan.json -o json > checkov-plan-results.json || true
+          else
+            checkov -d . --external-checks-dir ./custom-policies --quiet -o json > checkov-plan-results.json || true
+          fi
+        continue-on-error: true
+
+      # -- CUSTOM PYTHON ARN SCAN --
       - name: Run Python ARN Scan
         run: |
           python check_python_arn_version.py
@@ -50,6 +73,7 @@ jobs:
           cat arn_results.json || echo "arn_results.json not found"
           echo "==== End ARN RESULTS ===="
 
+      # ---- POST INLINE COMMENTS FOR CHECKOV ----
       - name: Post Checkov Inline Review Comments (with debug and escaping)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -57,17 +81,17 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           COMMIT_ID: ${{ github.event.pull_request.head.sha }}
         run: |
-          IS_ARRAY=$(jq 'type=="array"' checkov_results.json)
+          IS_ARRAY=$(jq 'type=="array"' checkov-plan-results.json)
           if [ "$IS_ARRAY" = "true" ]; then
             JQ_ROOT='.[].results.failed_checks[]'
-            HAS_FAILS=$(jq 'reduce .[].results.failed_checks[] as $item (0; .+1)' checkov_results.json)
+            HAS_FAILS=$(jq 'reduce .[].results.failed_checks[] as $item (0; .+1)' checkov-plan-results.json)
           else
             JQ_ROOT='.results.failed_checks[]'
-            HAS_FAILS=$(jq '.results.failed_checks | length' checkov_results.json)
+            HAS_FAILS=$(jq '.results.failed_checks | length' checkov-plan-results.json)
           fi
 
           if [ "$HAS_FAILS" -gt 0 ]; then
-            jq -c "$JQ_ROOT" checkov_results.json | while read -r issue; do
+            jq -c "$JQ_ROOT" checkov-plan-results.json | while read -r issue; do
               FILE=$(echo "$issue" | jq -r '.file_path' | sed 's|^/||')
               LINE=$(echo "$issue" | jq -r '.file_line_range[0]')
               ID=$(echo "$issue" | jq -r '.check_id // "N/A"')
@@ -106,6 +130,7 @@ jobs:
             echo "DEBUG: No failed Checkov checks found."
           fi
 
+      # ---- POST INLINE COMMENTS FOR PYTHON ARN ----
       - name: Post Python ARN Review Comments (with debug and escaping)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
