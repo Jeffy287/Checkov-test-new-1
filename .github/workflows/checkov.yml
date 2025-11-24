@@ -8,6 +8,10 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+  pull-requests: write
+
 jobs:
   checkov_custom:
     runs-on: ubuntu-latest
@@ -27,9 +31,101 @@ jobs:
         run: |
           checkov -d . \
             --external-checks-dir ./custom-policies \
-            --compact
+            --compact \
+            -o json > checkov-report.json
         continue-on-error: true
 
       - name: Run Python ARN version pin check
-        run: python check_python_arn_version.py
+        run: python check_python_arn_version.py || true
         continue-on-error: true
+
+      - name: Format Security Scan Markdown
+        run: |
+          echo "# :shield: Security Scan Report" > report.md
+          echo "" >> report.md
+          CHECKOV_JSON="checkov-report.json"
+          CHECKOV_PASSED=$(jq '.summary.passed' "$CHECKOV_JSON" 2>/dev/null || echo "0")
+          CHECKOV_FAILED=$(jq '.summary.failed' "$CHECKOV_JSON" 2>/dev/null || echo "0")
+          CHECKOV_SKIPPED=$(jq '.summary.skipped' "$CHECKOV_JSON" 2>/dev/null || echo "0")
+          {
+              echo "1️⃣ **Checkov Report**"
+              echo "   - 🟢 **PASSED Checks:** $CHECKOV_PASSED"
+              echo "   - 🔴 **FAILED Checks:** $CHECKOV_FAILED"
+              echo "   - ⚠️  **SKIPPED Checks:** $CHECKOV_SKIPPED"
+              echo ""
+              if [ "$CHECKOV_FAILED" -eq 0 ]; then
+                  echo ":white_check_mark: Everything looks secure. Great job! 🔐"
+              else
+                  echo "*⚡️ Every 🔴 is a risk bomb. Defuse before you MERGE!*"
+              fi
+              echo ""
+              echo "---"
+              echo ""
+          } >> report.md
+          echo "## :cloud: Checkov Detailed Report" >> report.md
+          echo "" >> report.md
+          if [ -f "$CHECKOV_JSON" ]; then
+              FAILED=$(jq '.results.failed_checks | length' "$CHECKOV_JSON" 2>/dev/null || echo "0")
+              if [ "$FAILED" -gt 0 ]; then
+                  jq -r '
+                      .results.failed_checks[]? |
+                      "- **" + (.check_id // "N/A") + ":** " + (.check_name // "N/A") + "\n" +
+                      (
+                          if (.file_path // "") != "" and
+                          ((.file_line_range | type) == "array" and (.file_line_range | length) > 0)
+                          then
+                              "  - **Location:** `" + (.file_path | ltrimstr("/")) + ":" + ((.file_line_range[0]|tostring) // "?") + "`\n"
+                          elif .resource_address then
+                              "  - **Resource:** `" + .resource_address + "`\n"
+                          else "" end
+                      ) +
+                      "  - **Severity:** " + ((.severity // "N/A")) + "\n" +
+                      "  - **Description:** " + ((.description // .check_name // "No description provided.")) + "\n"
+                  ' "$CHECKOV_JSON" >> report.md
+              else
+                  echo ":white_check_mark: **No failed infrastructure checks found!**" >> report.md
+              fi
+          fi
+          echo "" >> report.md
+          echo "---" >> report.md
+          echo "*This report was generated automatically by the Security Scan Pipeline*" >> report.md
+
+      - name: Write Report to Job Summary
+        run: cat report.md >> $GITHUB_STEP_SUMMARY
+
+      - name: Post PR comments for Checkov failures
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          COMMIT_ID: ${{ github.event.pull_request.head.sha }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          CHECKOV_JSON="checkov-report.json"
+          if [ -f "$CHECKOV_JSON" ] && jq -e '.results.failed_checks | length > 0' "$CHECKOV_JSON" > /dev/null; then
+            jq -c '.results.failed_checks[]' "$CHECKOV_JSON" | while read -r issue; do
+              PATH_TO_FILE=$(echo "$issue" | jq -r '.file_path')
+              LINE=$(echo "$issue" | jq -r '.file_line_range[0]')
+              BODY=$(echo "$issue" | jq -r '.check_id + ": " + .check_name')
+              if [[ -n "$PATH_TO_FILE" && -n "$LINE" && -n "$BODY" ]]; then
+                curl -L -X POST \
+                  -H "Accept: application/vnd.github+json" \
+                  -H "Authorization: Bearer $GITHUB_TOKEN" \
+                  "https://api.github.com/repos/$REPOSITORY/pulls/$PR_NUMBER/comments" \
+                  -d "{
+                    \"body\": \"$BODY\",
+                    \"commit_id\": \"$COMMIT_ID\",
+                    \"path\": \"$PATH_TO_FILE\",
+                    \"line\": $LINE
+                  }"
+              else
+                echo "Skipping comment due to missing data: Path=$PATH_TO_FILE, Line=$LINE, Body=$BODY"
+              fi
+            done
+          else
+            echo "No failed Checkov checks found or report file is missing."
+          fi
+
+      - name: Post Security Scan Summary to PR
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+            path: report.md
