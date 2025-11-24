@@ -12,6 +12,6 @@ foo = "hello world"
 
 # In a list (should be flagged if version-pinned)
 role_arns = [
-    "arn:aws:iam::123456789012:role/application-role:6",  # should be flagged
+    "arn:aws:iam::123456789012:role/application-role:9",  # should be flagged
     "arn:aws:iam::123456789012:role/application-role"
 ]
