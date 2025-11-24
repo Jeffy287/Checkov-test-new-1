@@ -1,16 +1,16 @@
 name: Checkov Custom Policy Scan
 
+
 on:
-  push:
-    branches:
-      - main
   pull_request:
     branches:
       - main
 
+
 permissions:
   contents: read
   pull-requests: write
+
 
 jobs:
   checkov_custom:
@@ -19,105 +19,83 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.9'
 
-      - name: Install Checkov and dependencies
-        run: |
-          pip install checkov jq
+
+      - name: Install Checkov
+        run: pip install checkov
+
 
       - name: Run Checkov with built-in and custom checks
         run: |
           checkov -d . \
             --external-checks-dir ./custom-policies \
-            --compact \
-            -o json > checkov-report.json
-        continue-on-error: true # Do not fail pipeline on policy violation
+            --quiet > checkov_results.txt || true
+        continue-on-error: true
 
-      - name: Format Security Scan Markdown
+
+      - name: Run Python ARN version pin check
         run: |
-          echo "# 🛡️ Security Scan Report" > report.md
-          CHECKOV_JSON="checkov-report.json"
-          CHECKOV_PASSED=$(jq '.summary.passed' "$CHECKOV_JSON" 2>/dev/null || echo "0")
-          CHECKOV_FAILED=$(jq '.summary.failed' "$CHECKOV_JSON" 2>/dev/null || echo "0")
-          CHECKOV_SKIPPED=$(jq '.summary.skipped' "$CHECKOV_JSON" 2>/dev/null || echo "0")
-          {
-              echo "1️⃣ **Checkov Report**"
-              echo "🟢 PASSED Checks: $CHECKOV_PASSED"
-              echo "🔴 FAILED Checks: $CHECKOV_FAILED"
-              echo "⚠️ SKIPPED Checks: $CHECKOV_SKIPPED"
-              echo ""
-              if [ "$CHECKOV_FAILED" -eq 0 ]; then
-                  echo "✅ Everything looks secure. Great job! 🔐"
-              else
-                  echo "*⚡️ Every 🔴 is a risk bomb. Defuse before you MERGE!*"
-              fi
-              echo ""
-          } >> report.md
-          echo "☁️ Checkov Detailed Report" >> report.md
-          if [ -f "$CHECKOV_JSON" ]; then
-              FAILED=$(jq '.results.failed_checks | length' "$CHECKOV_JSON" 2>/dev/null || echo "0")
-              if [ "$FAILED" -gt 0 ]; then
-                  jq -r '
-                      .results.failed_checks[]? |
-                      "- **" + (.check_id // "N/A") + ":** " + (.check_name // "N/A") + "\n" +
-                      (
-                          if (.file_path // "") != "" and
-                             ((.file_line_range | type) == "array" and (.file_line_range | length) > 0)
-                          then
-                              "  - **Location:** `" + (.file_path | ltrimstr("/")) + ":" + ((.file_line_range[0]|tostring) // "?") + "`\n"
-                          elif .resource_address then
-                              "  - **Resource:** `" + .resource_address + "`\n"
-                          else "" end
-                      ) +
-                      "  - **Severity:** " + ((.severity // "N/A")) + "\n" +
-                      "  - **Description:** " + ((.description // .check_name // "No description provided.")) + "\n"
-                  ' "$CHECKOV_JSON" >> report.md
-              else
-                  echo "✅ No failed infrastructure checks found!" >> report.md
-              fi
-          fi
-          echo "" >> report.md
-          echo "*This report was generated automatically by the Security Scan Pipeline*" >> report.md
+          python check_python_arn_version.py > pyarn_results.txt || true
+        continue-on-error: true
 
-      - name: Write Report to Job Summary
-        run: cat report.md >> $GITHUB_STEP_SUMMARY
 
-      - name: Post PR comments for Checkov failures
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          COMMIT_ID: ${{ github.event.pull_request.head.sha }}
-          REPOSITORY: ${{ github.repository }}
+      - name: Combine scan results (grouped output)
         run: |
-          CHECKOV_JSON="checkov-report.json"
-          if [ -f "$CHECKOV_JSON" ] && jq -e '.results.failed_checks | length > 0' "$CHECKOV_JSON" > /dev/null; then
-            jq -c '.results.failed_checks[]' "$CHECKOV_JSON" | while read -r issue; do
-              PATH_TO_FILE=$(echo "$issue" | jq -r '.file_path')
-              LINE=$(echo "$issue" | jq -r '.file_line_range[0]')
-              BODY=$(echo "$issue" | jq -r '.check_id + ": " + .check_name')
-              if [[ -n "$PATH_TO_FILE" && -n "$LINE" && -n "$BODY" ]]; then
-                curl -L -X POST \
-                  -H "Accept: application/vnd.github+json" \
-                  -H "Authorization: Bearer $GITHUB_TOKEN" \
-                  "https://api.github.com/repos/$REPOSITORY/pulls/$PR_NUMBER/comments" \
-                  -d "{
-                    \"body\": \"$BODY\",
-                    \"commit_id\": \"$COMMIT_ID\",
-                    \"path\": \"$PATH_TO_FILE\",
-                    \"line\": $LINE
-                  }"
-              else
-                echo "Skipping comment due to missing data: Path=$PATH_TO_FILE, Line=$LINE, Body=$BODY"
-              fi
-            done
-          else
-            echo "No failed Checkov checks found or report file is missing."
+          echo "### Policy Violations and Version-pinned ARNs Detected" > pr_arn_report.md
+
+
+          # Built-in policies (everything except CKV_AWS_CUSTOM_001)
+          awk '
+          BEGIN {in_block=0}
+          /^Check: / {if(in_block){print block}; block=""; in_block=0}
+          /^Check: / && !/CKV_AWS_CUSTOM_001/ {block=$0"\n"; in_block=1; next}
+          in_block==1 {block=block $0 "\n"}
+          END{if(in_block){print block}}
+          ' checkov_results.txt > builtin_blocks.txt
+          if [ -s builtin_blocks.txt ]; then
+            echo -e "\n#### Terraform/Checkov Built-in Policy Failures\n\`\`\`" >> pr_arn_report.md
+            cat builtin_blocks.txt >> pr_arn_report.md
+            echo -e "\n\`\`\`" >> pr_arn_report.md
           fi
 
-      - name: Post Security Scan Summary to PR
+
+          # Custom CKV_AWS_CUSTOM_001 policies only
+          awk '
+          BEGIN {in_block=0}
+          /^Check: / {if(in_block){print block}; block=""; in_block=0}
+          /^Check: CKV_AWS_CUSTOM_001/ {block=$0"\n"; in_block=1; next}
+          in_block==1 {block=block $0 "\n"}
+          END{if(in_block){print block}}
+          ' checkov_results.txt > custom_blocks.txt
+          if [ -s custom_blocks.txt ]; then
+            echo -e "\n#### Terraform/Checkov Custom Policy Failures\n\`\`\`" >> pr_arn_report.md
+            cat custom_blocks.txt >> pr_arn_report.md
+            echo -e "\n\`\`\`" >> pr_arn_report.md
+          fi
+
+
+          # Python file violations
+          if [ -s pyarn_results.txt ]; then
+            echo -e "\n#### Python File Violations\n\`\`\`\n$(cat pyarn_results.txt)\n\`\`\`" >> pr_arn_report.md
+          fi
+
+
+          # Print green check if no fails
+          FOUND=0
+          if grep -q "FAILED" pr_arn_report.md || [ -s pyarn_results.txt ]; then
+            FOUND=1
+          fi
+          if [ $FOUND -eq 0 ]; then
+            echo -e "No policy violations or version-pinned ARNs were found! :white_check_mark:" > pr_arn_report.md
+          fi
+
+
+      - name: Comment scan results in PR
         uses: marocchino/sticky-pull-request-comment@v2
         with:
-            path: report.md
+          path: pr_arn_report.md
