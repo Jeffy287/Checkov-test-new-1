@@ -24,83 +24,31 @@ jobs:
       - name: Install Checkov
         run: pip install checkov
 
-      - name: Install GitHub CLI
-        run: sudo apt-get install gh
-
-      - name: Run Checkov with built-in and custom checks
+      - name: Run Checkov with built-in and custom checks (JSON output)
         run: |
-          checkov -d . \
-            --external-checks-dir ./custom-policies \
-            --quiet > checkov_results.txt || true
-        continue-on-error: true
+          checkov -d . --external-checks-dir ./custom-policies -o json > checkov-results.json || true
 
-      - name: Run Python ARN version pin check
+      - name: Post each failure as inline PR review comment
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          COMMIT_ID: ${{ github.event.pull_request.head.sha }}
         run: |
-          python check_python_arn_version.py > pyarn_results.txt || true
-        continue-on-error: true
-
-      - name: Split Built-in Policy Failures
-        run: |
-          awk '
-            BEGIN {block="";n=0}
-            /^Check: / && !/CKV_AWS_CUSTOM_001/ {
-              if(block) { n++; print block > ("builtin_error_block_" n ".txt"); block="" }
-              block=$0"\n"; next
-            }
-            /^Check: / { if(block) { n++; print block > ("builtin_error_block_" n ".txt"); block="" } }
-            { block=block $0 "\n" }
-            END { if(block) { n++; print block > ("builtin_error_block_" n ".txt") } }
-          ' checkov_results.txt
-
-      - name: Split Custom Policy Failures
-        run: |
-          awk '
-            BEGIN {block="";n=0}
-            /^Check: CKV_AWS_CUSTOM_001/ {
-              if(block) { n++; print block > ("custom_error_block_" n ".txt"); block="" }
-              block=$0"\n"; next
-            }
-            /^Check: / { if(block) { n++; print block > ("custom_error_block_" n ".txt"); block="" } }
-            { block=block $0 "\n" }
-            END { if(block) { n++; print block > ("custom_error_block_" n ".txt") } }
-          ' checkov_results.txt
-
-      - name: Split Python File Violations
-        run: |
-          n=0
-          while IFS= read -r line; do
-            if [ -n "$line" ] && [[ ! "$line" =~ ^[[:space:]]*$ ]]; then
-              n=$((n+1))
-              echo "$line" > "pyarn_error_block_$n.txt"
-            fi
-          done < pyarn_results.txt
-
-      - name: Post each built-in error as PR comment
-        run: |
-          for file in builtin_error_block_*.txt; do
-            if [ -s "$file" ] && grep -q '[^[:space:]]' "$file"; then
-              gh pr comment ${{ github.event.pull_request.number }} --body-file "$file"
+          # Iterate over each failed check in the Checkov JSON results
+          jq -c '.results.failed_checks[]' checkov-results.json | while read -r issue; do
+            PATH_TO_FILE=$(echo "$issue" | jq -r '.file_path' | sed 's|^\./||')  # Remove leading ./
+            LINE=$(echo "$issue" | jq -r '.file_line_range[0]')
+            BODY=$(echo "$issue" | jq -r '"**Checkov: \(.check_id)**\n\(.check_name)\nResource: \(.resource // "N/A")\nGuideline: \(.guideline // "N/A")"')
+            # Only comment if we have file/line and the file exists in this PR (optional, can skip this existence check)
+            if [[ -n "$PATH_TO_FILE" && -n "$LINE" && -n "$BODY" ]]; then
+              echo "Posting comment for $PATH_TO_FILE:$LINE"
+              curl -s -X POST \
+                -H "Authorization: Bearer $GITHUB_TOKEN" \
+                -H "Accept: application/vnd.github.v3+json" \
+                "https://api.github.com/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/comments" \
+                -d "{\"body\": \"$BODY\", \"commit_id\": \"$COMMIT_ID\", \"path\": \"$PATH_TO_FILE\", \"line\": $LINE, \"side\": \"RIGHT\"}"
+            else
+              echo "Skipping comment for $PATH_TO_FILE:$LINE (missing info)"
             fi
           done
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Post each custom error as PR comment
-        run: |
-          for file in custom_error_block_*.txt; do
-            if [ -s "$file" ] && grep -q '[^[:space:]]' "$file"; then
-              gh pr comment ${{ github.event.pull_request.number }} --body-file "$file"
-            fi
-          done
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Post each Python violation as PR comment
-        run: |
-          for file in pyarn_error_block_*.txt; do
-            if [ -s "$file" ] && grep -q '[^[:space:]]' "$file"; then
-              gh pr comment ${{ github.event.pull_request.number }} --body-file "$file"
-            fi
-          done
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
