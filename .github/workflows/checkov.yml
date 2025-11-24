@@ -77,9 +77,10 @@ jobs:
               ID=$(echo "$issue" | jq -r '.check_id // "N/A"')
               NAME=$(echo "$issue" | jq -r '.check_name // "Check violation"')
               GUIDE=$(echo "$issue" | jq -r '.guideline // ""')
+              # Use real newlines for multi-line messages
               MSG="**$ID**: $NAME"
               if [[ "$GUIDE" != "" && "$GUIDE" != "null" ]]; then
-                MSG="${MSG}\n[Guideline](${GUIDE})"
+                MSG="${MSG}"$'\n'"[Guideline](${GUIDE})"
               fi
               MSG_ESCAPED=$(printf '%s' "$MSG" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')
               echo "DEBUG: Issue FILE=$FILE LINE=$LINE ESCAPED_MSG=$MSG_ESCAPED"
