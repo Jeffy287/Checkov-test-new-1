@@ -24,9 +24,7 @@ jobs:
       - name: Install Checkov
         run: pip install checkov
 
-      - name: Install GitHub CLI
-        run: sudo apt-get install gh
-
+      # Run your scan and custom scripts
       - name: Run Checkov with built-in and custom checks
         run: |
           checkov -d . \
@@ -39,68 +37,107 @@ jobs:
           python check_python_arn_version.py > pyarn_results.txt || true
         continue-on-error: true
 
+      # Split error files (this is your existing logic, tweak if needed for path,line,message)
       - name: Split Built-in Policy Failures
         run: |
           awk '
-            BEGIN {block="";n=0}
+            BEGIN {block="";n=0;file="";line="";}
             /^Check: / && !/CKV_AWS_CUSTOM_001/ {
-              if(block) { n++; print block > ("builtin_error_block_" n ".txt"); block="" }
+              if(block) { 
+                n++; 
+                # Example: you must capture file/path/line within your block
+                echo "$file" > "builtin_error_block_"n".txt";
+                echo "$line" >> "builtin_error_block_"n".txt";
+                echo "$block" >> "builtin_error_block_"n".txt";
+                block=""; file=""; line="";
+              }
               block=$0"\n"; next
             }
-            /^Check: / { if(block) { n++; print block > ("builtin_error_block_" n ".txt"); block="" } }
+            # Here, add logic to parse block for file/path/line, or customize per your output
+            # For example, detect lines like "File: path/to/file.tf", "Line: 42"
+            # file=path; line=num
             { block=block $0 "\n" }
-            END { if(block) { n++; print block > ("builtin_error_block_" n ".txt") } }
-          ' checkov_results.txt
-
-      - name: Split Custom Policy Failures
-        run: |
-          awk '
-            BEGIN {block="";n=0}
-            /^Check: CKV_AWS_CUSTOM_001/ {
-              if(block) { n++; print block > ("custom_error_block_" n ".txt"); block="" }
-              block=$0"\n"; next
-            }
-            /^Check: / { if(block) { n++; print block > ("custom_error_block_" n ".txt"); block="" } }
-            { block=block $0 "\n" }
-            END { if(block) { n++; print block > ("custom_error_block_" n ".txt") } }
+            END { if(block) { 
+              n++; 
+              echo "$file" > "builtin_error_block_"n".txt";
+              echo "$line" >> "builtin_error_block_"n".txt";
+              echo "$block" >> "builtin_error_block_"n".txt";
+            }}
           ' checkov_results.txt
 
       - name: Split Python File Violations
         run: |
           n=0
           while IFS= read -r line; do
-            if [ -n "$line" ] && [[ ! "$line" =~ ^[[:space:]]*$ ]]; then
+            # Customize: parse your Python issue for file/line/message if possible
+            # Example if you format pyarn_results.txt as: filename:line_number:message
+            filename=$(echo "$line" | cut -d: -f1)
+            linenum=$(echo "$line" | cut -d: -f2)
+            message=$(echo "$line" | cut -d: -f3-)
+            if [ -n "$filename" ] && [ -n "$linenum" ] && [ -n "$message" ]; then
               n=$((n+1))
-              echo "$line" > "pyarn_error_block_$n.txt"
+              echo "$filename" > "pyarn_error_block_$n.txt"
+              echo "$linenum" >> "pyarn_error_block_$n.txt"
+              echo "$message" >> "pyarn_error_block_$n.txt"
             fi
           done < pyarn_results.txt
 
-      - name: Post each built-in error as PR comment
+      - name: Post each built-in error as PR review comment
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          COMMIT_ID: ${{ github.event.pull_request.head.sha }}
         run: |
           for file in builtin_error_block_*.txt; do
-            if [ -s "$file" ] && grep -q '[^[:space:]]' "$file"; then
-              gh pr comment ${{ github.event.pull_request.number }} --body-file "$file"
+            if [ -s "$file" ]; then
+              PATH_TO_FILE=$(head -n1 "$file")
+              LINE=$(sed -n '2p' "$file")
+              BODY=$(tail -n +3 "$file" | tr '\n' ' ')
+              if [[ -n "$PATH_TO_FILE" && -n "$LINE" && -n "$BODY" ]]; then
+                echo "Posting review comment for $BODY at $PATH_TO_FILE:$LINE"
+                curl -L -X POST \
+                  -H "Authorization: Bearer $GITHUB_TOKEN" \
+                  -H "Accept: application/vnd.github+json" \
+                  "https://api.github.com/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/comments" \
+                  -d "{
+                    \"body\": \"$BODY\",
+                    \"commit_id\": \"$COMMIT_ID\",
+                    \"path\": \"$PATH_TO_FILE\",
+                    \"line\": $LINE
+                  }"
+              else
+                echo "Skipping comment for $file due to missing data"
+              fi
             fi
           done
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Post each custom error as PR comment
-        run: |
-          for file in custom_error_block_*.txt; do
-            if [ -s "$file" ] && grep -q '[^[:space:]]' "$file"; then
-              gh pr comment ${{ github.event.pull_request.number }} --body-file "$file"
-            fi
-          done
+      - name: Post each Python error as PR review comment
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Post each Python violation as PR comment
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          COMMIT_ID: ${{ github.event.pull_request.head.sha }}
         run: |
           for file in pyarn_error_block_*.txt; do
-            if [ -s "$file" ] && grep -q '[^[:space:]]' "$file"; then
-              gh pr comment ${{ github.event.pull_request.number }} --body-file "$file"
+            if [ -s "$file" ]; then
+              PATH_TO_FILE=$(head -n1 "$file")
+              LINE=$(sed -n '2p' "$file")
+              BODY=$(tail -n +3 "$file" | tr '\n' ' ')
+              if [[ -n "$PATH_TO_FILE" && -n "$LINE" && -n "$BODY" ]]; then
+                echo "Posting review comment for $BODY at $PATH_TO_FILE:$LINE"
+                curl -L -X POST \
+                  -H "Authorization: Bearer $GITHUB_TOKEN" \
+                  -H "Accept: application/vnd.github+json" \
+                  "https://api.github.com/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/comments" \
+                  -d "{
+                    \"body\": \"$BODY\",
+                    \"commit_id\": \"$COMMIT_ID\",
+                    \"path\": \"$PATH_TO_FILE\",
+                    \"line\": $LINE
+                  }"
+              else
+                echo "Skipping comment for $file due to missing data"
+              fi
             fi
           done
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
