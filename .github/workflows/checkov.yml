@@ -36,80 +36,55 @@ jobs:
           python check_python_arn_version.py > pyarn_results.txt || true
         continue-on-error: true
 
-      - name: Build markdown report
+      - name: Split Built-in Policy Failures
         run: |
-          #!/bin/bash
-          echo "# :shield: Policy & Python ARN Scan Report" > pr_arn_report.md
-          echo "" >> pr_arn_report.md
-
-          # Count results
-          BUILTIN_FAILED=$(awk '/^Check: / && $0 !~ /CKV_AWS_CUSTOM_001/ {c++} END{print c+0}' checkov_results.txt)
-          CUSTOM_FAILED=$(awk '/^Check: CKV_AWS_CUSTOM_001/ {c++} END{print c+0}' checkov_results.txt)
-          PYARN_VIOLATIONS=$(grep -c . pyarn_results.txt)
-
-          # Summary
-          echo "1️⃣ **Checkov Built-in Policy Violations**" >> pr_arn_report.md
-          echo "- 🔴 **Count:** $BUILTIN_FAILED" >> pr_arn_report.md
-          echo "" >> pr_arn_report.md
-          echo "2️⃣ **Checkov Custom Policy Violations**" >> pr_arn_report.md
-          echo "- 🔴 **Count:** $CUSTOM_FAILED" >> pr_arn_report.md
-          echo "" >> pr_arn_report.md
-          echo "3️⃣ **Python ARN Version Pin Violations**" >> pr_arn_report.md
-          echo "- 🔴 **Count:** $PYARN_VIOLATIONS" >> pr_arn_report.md
-          echo "" >> pr_arn_report.md
-
-          if [[ "$BUILTIN_FAILED" -eq 0 && "$CUSTOM_FAILED" -eq 0 && "$PYARN_VIOLATIONS" -eq 0 ]]; then
-            echo ":white_check_mark: Everything looks secure. Great job! 🔐" >> pr_arn_report.md
-          else
-            echo "*⚡️ Every 🔴 is a risk bomb. Defuse before you MERGE!*" >> pr_arn_report.md
-          fi
-
-          echo "---" >> pr_arn_report.md
-          echo "" >> pr_arn_report.md
-
-          # Details for built-in
-          echo "## :cloud: Checkov Built-in Policy Failures" >> pr_arn_report.md
           awk '
-          BEGIN {in_block=0}
-          /^Check: / {if(in_block && block!~/CKV_AWS_CUSTOM_001/){print block}; block=""; in_block=0}
-          /^Check: / && !/CKV_AWS_CUSTOM_001/ {block=$0"\n"; in_block=1; next}
-          in_block==1 {block=block $0 "\n"}
-          END{if(in_block && block!~/CKV_AWS_CUSTOM_001/){print block}}
-          ' checkov_results.txt >> pr_arn_report.md
-          if [[ "$BUILTIN_FAILED" -eq 0 ]]; then
-            echo ":white_check_mark: **No failed built-in policy checks found!**" >> pr_arn_report.md
-          fi
-          echo "" >> pr_arn_report.md
+          BEGIN {block="";n=0}
+          /^Check: / && !/CKV_AWS_CUSTOM_001/ {
+            if(block) { n++; print block > ("builtin_error_block_" n ".txt"); block="" }
+            block=$0"\n"; next
+          }
+          /^Check: / { if(block) { n++; print block > ("builtin_error_block_" n ".txt"); block="" } }
+          { block=block $0 "\n" }
+          END { if(block) { n++; print block > ("builtin_error_block_" n ".txt") } }
+          ' checkov_results.txt
 
-          # Details for custom
-          echo "## :wrench: Checkov Custom Policy Failures" >> pr_arn_report.md
+      - name: Split Custom Policy Failures
+        run: |
           awk '
-          BEGIN {in_block=0}
-          /^Check: / {if(in_block && block~/CKV_AWS_CUSTOM_001/){print block}; block=""; in_block=0}
-          /^Check: CKV_AWS_CUSTOM_001/ {block=$0"\n"; in_block=1; next}
-          in_block==1 {block=block $0 "\n"}
-          END{if(in_block && block~/CKV_AWS_CUSTOM_001/){print block}}
-          ' checkov_results.txt >> pr_arn_report.md
-          if [[ "$CUSTOM_FAILED" -eq 0 ]]; then
-            echo ":white_check_mark: **No failed custom policy checks found!**" >> pr_arn_report.md
-          fi
-          echo "" >> pr_arn_report.md
+          BEGIN {block="";n=0}
+          /^Check: CKV_AWS_CUSTOM_001/ {
+            if(block) { n++; print block > ("custom_error_block_" n ".txt"); block="" }
+            block=$0"\n"; next
+          }
+          /^Check: / { if(block) { n++; print block > ("custom_error_block_" n ".txt"); block="" } }
+          { block=block $0 "\n" }
+          END { if(block) { n++; print block > ("custom_error_block_" n ".txt") } }
+          ' checkov_results.txt
 
-          # Python violations
-          echo "## :snake: Python File Violations" >> pr_arn_report.md
-          if [ -s pyarn_results.txt ]; then
-            echo "```
-            cat pyarn_results.txt >> pr_arn_report.md
-            echo "```" >> pr_arn_report.md
-          else
-            echo ":white_check_mark: **No Python ARN issues found!**" >> pr_arn_report.md
-          fi
+      - name: Split Python File Violations
+        run: |
+          # Each line in pyarn_results.txt represents a separate violation.
+          n=0
+          while IFS= read -r line; do
+            n=$((n+1))
+            echo "$line" > "pyarn_error_block_$n.txt"
+          done < pyarn_results.txt
 
-          echo "" >> pr_arn_report.md
-          echo "---" >> pr_arn_report.md
-          echo "*This report was generated automatically by the Custom Policy Scan Pipeline*" >> pr_arn_report.md
-
-      - name: Comment scan results in PR
+      - name: Comment built-in policy results
         uses: marocchino/sticky-pull-request-comment@v2
         with:
-          path: pr_arn_report.md
+          path: builtin_error_block_*.txt
+        if: always()
+
+      - name: Comment custom policy results
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          path: custom_error_block_*.txt
+        if: always()
+
+      - name: Comment Python violation results
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          path: pyarn_error_block_*.txt
+        if: always()
