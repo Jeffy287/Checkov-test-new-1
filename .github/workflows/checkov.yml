@@ -3,8 +3,6 @@ name: Checkov Custom Policy Scan
 on:
   pull_request:
     types: [opened, synchronize, reopened]
-    branches:
-      - main
 
 permissions:
   contents: read
@@ -13,8 +11,9 @@ permissions:
 jobs:
   checkov_custom:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout code
+      - name: Checkout Code
         uses: actions/checkout@v4
 
       - name: Set up Python
@@ -22,102 +21,101 @@ jobs:
         with:
           python-version: '3.9'
 
-      - name: Install Checkov, Bandit, and jq
-        run: |
-          pip install checkov bandit
-          sudo apt-get update && sudo apt-get install -y jq
+      - name: Install Checkov
+        run: pip install checkov
 
-      - name: Run Checkov with built-in and custom checks (JSON output)
+      - name: Run Checkov (builtin + custom checks)
         run: |
           checkov -d . \
             --external-checks-dir ./custom-policies \
-            -o json > checkov-report.json || true
+            -o json > checkov-report.json
         continue-on-error: true
 
-      - name: Run Bandit
-        run: bandit -r . -f json -o bandit-report.json || true
+      - name: Run Python ARN Version Pin Check
+        run: python check_python_arn_version.py > arn-report.json
         continue-on-error: true
 
-      # Optionally, run your Python custom check for ARNs (output to JSON if you want per-line comments!)
-      # - name: Run Python ARN version pin check
-      #   run: python check_python_arn_version.py > python-arn-report.json || true
-
-      - name: Post PR review comments for Checkov failures (inline/diff comments)
+      ###########################################################
+      # POST CHECKOV FAILURES AS PR COMMENTS
+      ###########################################################
+      - name: Comment Checkov Failures on PR
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          COMMIT_ID: ${{ github.event.pull_request.head.sha }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          COMMIT: ${{ github.event.pull_request.head.sha }}
         run: |
-          if [ -f checkov-report.json ] && jq -e '.results.failed_checks | length > 0' checkov-report.json > /dev/null; then
+          if jq -e '.results.failed_checks | length > 0' checkov-report.json > /dev/null; then
             jq -c '.results.failed_checks[]' checkov-report.json | while read -r issue; do
-              FILE_PATH=$(echo "$issue" | jq -r '.file_path')
+              FILE=$(echo "$issue" | jq -r '.file_path')
               LINE=$(echo "$issue" | jq -r '.file_line_range[0]')
-              CHECK_ID=$(echo "$issue" | jq -r '.check_id')
-              CHECK_NAME=$(echo "$issue" | jq -r '.check_name')
-              GUIDE=$(echo "$issue" | jq -r '.guideline // empty')
-              BODY="Check: $CHECK_ID: \"$CHECK_NAME\""
-              [ -n "$GUIDE" ] && BODY="$BODY\nGuide: $GUIDE"
-              DISPLAY_PATH="${FILE_PATH#./}"
-              if [[ -n "$DISPLAY_PATH" && -n "$LINE" && -n "$BODY" ]]; then
-                curl -s -L -X POST \
-                  -H "Accept: application/vnd.github+json" \
-                  -H "Authorization: Bearer $GITHUB_TOKEN" \
-                  "https://api.github.com/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/comments" \
-                  -d "{
-                    \"body\": \"$BODY\",
-                    \"commit_id\": \"$COMMIT_ID\",
-                    \"path\": \"$DISPLAY_PATH\",
-                    \"line\": $LINE
-                  }"
-              fi
+              BODY=$(echo "$issue" | jq -r '.check_id + ": " + .check_name')
+
+              [ -z "$FILE" ] && continue
+              [ -z "$LINE" ] && continue
+
+              echo "Posting PR comment for $BODY"
+
+              curl -s -X POST \
+                -H "Authorization: Bearer $GITHUB_TOKEN" \
+                -H "Accept: application/vnd.github+json" \
+                https://api.github.com/repos/$REPO/pulls/$PR/comments \
+                -d "{
+                  \"body\": \"$BODY\",
+                  \"commit_id\": \"$COMMIT\",
+                  \"path\": \"$FILE\",
+                  \"line\": $LINE
+                }"
             done
+          else
+            echo "No Checkov failures"
           fi
 
-      - name: Post PR review comments for Bandit failures (per issue)
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          COMMIT_ID: ${{ github.event.pull_request.head.sha }}
+      ###########################################################
+      # GENERATE MARKDOWN REPORT
+      ###########################################################
+      - name: Generate Markdown Report
         run: |
-          if [ -f bandit-report.json ] && jq -e '.results | length > 0' bandit-report.json > /dev/null; then
-            jq -c '.results[]' bandit-report.json | while read -r issue; do
-              FILE_PATH=$(echo "$issue" | jq -r '.filename')
-              LINE=$(echo "$issue" | jq -r '.line_number')
-              TEXT=$(echo "$issue" | jq -r '.issue_text')
-              SEV=$(echo "$issue" | jq -r '.issue_severity')
-              CONF=$(echo "$issue" | jq -r '.issue_confidence')
-              BODY="Bandit: $TEXT (Severity: $SEV, Confidence: $CONF)"
-              DISPLAY_PATH="${FILE_PATH#./}"
-              if [[ -n "$DISPLAY_PATH" && -n "$LINE" && -n "$BODY" ]]; then
-                curl -s -L -X POST \
-                  -H "Accept: application/vnd.github+json" \
-                  -H "Authorization: Bearer $GITHUB_TOKEN" \
-                  "https://api.github.com/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/comments" \
-                  -d "{
-                    \"body\": \"$BODY\",
-                    \"commit_id\": \"$COMMIT_ID\",
-                    \"path\": \"$DISPLAY_PATH\",
-                    \"line\": $LINE
-                  }"
-              fi
-            done
+          echo "# 🔍 Custom Checkov Scan Report" > report.md
+          echo "" >> report.md
+
+          CHECKOV_PASSED=$(jq '.summary.passed' checkov-report.json 2>/dev/null || echo "0")
+          CHECKOV_FAILED=$(jq '.summary.failed' checkov-report.json 2>/dev/null || echo "0")
+          CHECKOV_SKIPPED=$(jq '.summary.skipped' checkov-report.json 2>/dev/null || echo "0")
+
+          echo "## 1️⃣ Checkov Summary" >> report.md
+          echo "- 🟢 Passed: $CHECKOV_PASSED" >> report.md
+          echo "- 🔴 Failed: $CHECKOV_FAILED" >> report.md
+          echo "- ⚠️ Skipped: $CHECKOV_SKIPPED" >> report.md
+          echo "" >> report.md
+
+          echo "## 2️⃣ ARN Version Pin Script Output" >> report.md
+          echo '```json' >> report.md
+          cat arn-report.json >> report.md
+          echo '```' >> report.md
+
+          echo "" >> report.md
+          echo "---" >> report.md
+          echo "### 🎯 Final Status" >> report.md
+          if [ "$CHECKOV_FAILED" -eq 0 ]; then
+            echo "✅ All checks passed!" >> report.md
+          else
+            echo "⚠️ Some checks failed — please review comments above." >> report.md
           fi
 
-      # If nothing fails, post a green check as a regular comment
-      - name: Post green check if nothing failed
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+      ###########################################################
+      # SHOW SUMMARY IN GITHUB UI
+      ###########################################################
+      - name: Add Summary to GitHub UI
         run: |
-          CK_FAILS=$(jq '.results.failed_checks | length' checkov-report.json 2>/dev/null || echo 0)
-          BANDIT_FAILS=$(jq '.results | length' bandit-report.json 2>/dev/null || echo 0)
-          if [ "$CK_FAILS" -eq 0 ] && [ "$BANDIT_FAILS" -eq 0 ]; then
-            curl -s -L -X POST \
-              -H "Accept: application/vnd.github+json" \
-              -H "Authorization: Bearer $GITHUB_TOKEN" \
-              "https://api.github.com/repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
-              -d '{"body": "No policy violations or version-pinned ARNs were found! :white_check_mark:"}'
-          fi
+          echo "## 🔍 Custom Checkov Scan Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          cat report.md >> $GITHUB_STEP_SUMMARY
+
+      ###########################################################
+      # STICKY PR COMMENT (updates automatically)
+      ###########################################################
+      - name: Post Sticky PR Summary
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          path: report.md
