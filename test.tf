@@ -4,7 +4,7 @@
 # Added this comment to trigger a change in the diff--enables Checkov inline review
 resource "aws_lambda_function" "bad_lambda" {
   function_name = "bad_lambda"
-  role          = "arn:aws:iam::123456789012:role/lambda-role:2" # Fails: ':2' version
+  role          = "arn:aws:iam::123456789012:role/lambda-role:4" # Fails: ':2' version
   handler       = "main.handler"   # ← CHANGED FROM "index.handler"!
   runtime       = "python3.9"
   filename      = "lambda.zip"
@@ -23,7 +23,7 @@ resource "aws_lambda_function" "good_lambda" {
 ####################
 resource "aws_ecs_task_definition" "bad_ecs" {
   family                   = "bad_ecs"
-  execution_role_arn       = "arn:aws:iam::123456789012:role/ecs-role:11" # Fails: ':11' version
+  execution_role_arn       = "arn:aws:iam::123456789012:role/ecs-role:10" # Fails: ':11' version
   container_definitions    = "[]" # Simplified for example
 }
 
@@ -39,7 +39,7 @@ resource "aws_ecs_task_definition" "good_ecs" {
 resource "aws_batch_job_definition" "bad_batch" {
   name = "bad_batch"
   type = "container"
-  role = "arn:aws:iam::123456789012:role/batch-role:5" # Fails: ':5' version
+  role = "arn:aws:iam::123456789012:role/batch-role:5" # Fails: ':9' version
 }
 
 resource "aws_batch_job_definition" "good_batch" {
@@ -53,7 +53,7 @@ resource "aws_batch_job_definition" "good_batch" {
 ####################
 resource "aws_autoscaling_group" "bad_asg" {
   name                    = "bad_asg"
-  service_linked_role_arn = "arn:aws:iam::123456789012:role/asg-role:8" # Fails: ':8' version
+  service_linked_role_arn = "arn:aws:iam::123456789012:role/asg-role:8" # Fails: ':7' version
 }
 
 resource "aws_autoscaling_group" "good_asg" {
@@ -66,7 +66,7 @@ resource "aws_autoscaling_group" "good_asg" {
 ####################
 resource "aws_launch_template" "bad_lt" {
   name                  = "bad_lt"
-  iam_instance_profile  = "arn:aws:iam::123456789012:instance-profile/launch-profile:6" # Fails: ':6' version
+  iam_instance_profile  = "arn:aws:iam::123456789012:instance-profile/launch-profile:9" # Fails: ':6' version
 }
 
 resource "aws_launch_template" "good_lt" {
@@ -82,7 +82,7 @@ resource "aws_lambda_layer_version" "bad_layer" {
   compatible_runtimes   = ["python3.9"]
   filename              = "layer.zip"
   # Layer ARN with version
-  arn                   = "arn:aws:lambda:us-east-1:123456789012:layer:custom-layer:9" # Fails: ':9' version
+  arn                   = "arn:aws:lambda:us-east-1:123456789012:layer:custom-layer:9" # Fails: ':5' version
 }
 
 resource "aws_lambda_layer_version" "good_layer" {
@@ -98,12 +98,12 @@ resource "aws_lambda_layer_version" "good_layer" {
 ####################
 resource "aws_sfn_state_machine" "bad_sfn" {
   name     = "bad_sfn"
-  role_arn = "arn:aws:iam::123456789012:role/sfn-role:7" # Fails: ':7' version
+  role_arn = "arn:aws:iam::123456789012:role/sfn-role:7" # Fails: ':8' version
   definition = jsonencode({
     States = {
       LambdaTask = {
         Type     = "Task"
-        Resource = "arn:aws:lambda:us-east-1:123456789012:function:my-fn:5" # Fails: ':5' version inside definition
+        Resource = "arn:aws:lambda:us-east-1:123456789012:function:my-fn:5" # Fails: ':9' version inside definition
         End      = true
       }
     }
