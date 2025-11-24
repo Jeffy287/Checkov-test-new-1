@@ -2,6 +2,7 @@ name: Checkov Custom Policy Scan
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened]
     branches:
       - main
 
@@ -21,14 +22,16 @@ jobs:
         with:
           python-version: '3.9'
 
-      - name: Install Checkov
-        run: pip install checkov
+      - name: Install Checkov and jq
+        run: |
+          pip install checkov
+          sudo apt-get update && sudo apt-get install -y jq
 
-      - name: Run Checkov with built-in and custom checks
+      - name: Run Checkov with built-in and custom checks (JSON)
         run: |
           checkov -d . \
             --external-checks-dir ./custom-policies \
-            > checkov_results.txt || true
+            -o json > checkov-report.json || true
         continue-on-error: true
 
       - name: Run Python ARN version pin check
@@ -36,63 +39,46 @@ jobs:
           python check_python_arn_version.py > pyarn_results.txt || true
         continue-on-error: true
 
-      - name: Post built-in Checkov failures as PR comments
-        run: |
-          awk '
-          BEGIN {in_block=0}
-          /^Check: / {if(in_block && block ~ /FAILED for resource:/){print block > "fail" ++fail ".txt"}; block=""; in_block=0}
-          /^Check: / && !/CKV_AWS_CUSTOM_001/ {block=$0"\n"; in_block=1; next}
-          in_block==1 {block=block $0 "\n"}
-          END{if(in_block && block ~ /FAILED for resource:/){print block > "fail" ++fail ".txt"}}
-          ' checkov_results.txt
-
-          for file in fail*.txt; do
-            if [ -s "$file" ]; then
-              gh pr comment "$PR_NUMBER" --body "$(cat $file)"
-            fi
-          done
+      - name: Post inline PR review comments for Checkov failures
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
-
-      - name: Post custom Checkov failures as PR comments
+          COMMIT_ID: ${{ github.event.pull_request.head.sha }}
         run: |
-          awk '
-          BEGIN {in_block=0}
-          /^Check: / {if(in_block && block ~ /FAILED for resource:/){print block > "cfail" ++fail ".txt"}; block=""; in_block=0}
-          /^Check: CKV_AWS_CUSTOM_001/ {block=$0"\n"; in_block=1; next}
-          in_block==1 {block=block $0 "\n"}
-          END{if(in_block && block ~ /FAILED for resource:/){print block > "cfail" ++fail ".txt"}}
-          ' checkov_results.txt
-
-          for file in cfail*.txt; do
-            if [ -s "$file" ]; then
-              gh pr comment "$PR_NUMBER" --body "$(cat $file)"
-            fi
-          done
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-
-      - name: Post Python ARN violations as PR comments
-        run: |
-          if [ -s pyarn_results.txt ]; then
-            awk '/File: /{if(L){print L > ("pyfail" ++fail ".txt")}; L=$0; next} L{L=L"\n"$0} END{if(L){print L > ("pyfail" ++fail ".txt")}}' pyarn_results.txt
-            for file in pyfail*.txt; do
-              if [ -s "$file" ]; then
-                gh pr comment "$PR_NUMBER" --body "$(cat $file)"
+          if [ -f checkov-report.json ] && jq -e '.results.failed_checks | length > 0' checkov-report.json > /dev/null; then
+            jq -c '.results.failed_checks[]' checkov-report.json | while read -r issue; do
+              FILE_PATH=$(echo "$issue" | jq -r '.file_path')
+              LINE=$(echo "$issue" | jq -r '.file_line_range[0]')
+              BODY=$(echo "$issue" | jq -r '"**" + .check_id + "**: " + .check_name + (if .guideline then "\nGuide: \(.guideline)" else "" end)')
+              if [[ -n "$FILE_PATH" && -n "$LINE" && -n "$BODY" ]]; then
+                DISPLAY_PATH="${FILE_PATH#./}"
+                curl -s -L -X POST \
+                  -H "Accept: application/vnd.github+json" \
+                  -H "Authorization: Bearer $GITHUB_TOKEN" \
+                  "https://api.github.com/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/comments" \
+                  -d "{
+                    \"body\": \"$BODY\",
+                    \"commit_id\": \"$COMMIT_ID\",
+                    \"path\": \"$DISPLAY_PATH\",
+                    \"line\": $LINE
+                  }"
               fi
             done
+          else
+            echo "No failed Checkov checks found or report file is missing."
           fi
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
 
       - name: Post green check if nothing failed
-        run: |
-          if ! ls fail*.txt 1> /dev/null 2>&1 && ! ls cfail*.txt 1> /dev/null 2>&1 && ! ls pyfail*.txt 1> /dev/null 2>&1; then
-            gh pr comment "$PR_NUMBER" --body "No policy violations or version-pinned ARNs were found! :white_check_mark:"
-          fi
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          if ! [ -f checkov-report.json ] || ! jq -e '.results.failed_checks | length > 0' checkov-report.json > /dev/null; then
+            curl -s -L -X POST \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              "https://api.github.com/repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
+              -d '{"body": "No policy violations or version-pinned ARNs were found! :white_check_mark:"}'
+          fi
