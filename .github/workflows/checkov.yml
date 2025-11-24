@@ -2,8 +2,7 @@ name: Checkov Custom Policy Inline Review
 
 on:
   pull_request:
-    branches:
-      - main
+    branches: [main]
 
 permissions:
   contents: read
@@ -26,21 +25,19 @@ jobs:
           pip install checkov
           sudo apt-get update && sudo apt-get install -y jq gh
 
-      - name: Run Checkov scan (JSON output)
+      - name: Run Checkov (JSON output)
         run: |
-          checkov -d . \
-            --external-checks-dir ./custom-policies \
-            --quiet -o json > checkov_results.json || true
+          checkov -d . --external-checks-dir ./custom-policies --quiet -o json > checkov_results.json || true
         continue-on-error: true
 
-      - name: Cache PR diff file list
-        id: pr_diff
+      - name: Get Changed Files
         env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          gh pr diff $PR_NUMBER --name-only | sed 's|^./||' > changed_files.txt
+          gh pr diff $PR_NUMBER --name-only | sed 's|^./||' | sort | uniq > changed_files.txt
 
-      - name: Post Checkov review comments with Reply button (only on changed files)
+      - name: Post Checkov Inline Review Comments
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
@@ -60,18 +57,18 @@ jobs:
             jq -c "$JQ_ROOT" checkov_results.json | while read -r issue; do
               FILE=$(echo "$issue" | jq -r '.file_path' | sed 's|^/||')
               LINE=$(echo "$issue" | jq -r '.file_line_range[0]')
-              ID=$(echo "$issue" | jq -r '.check_id')
-              NAME=$(echo "$issue" | jq -r '.check_name')
-              GUIDE=$(echo "$issue" | jq -r '.guideline')
-              [ "$GUIDE" = "null" ] && GUIDE="#"
-              MSG="**$ID**: $NAME\n[Guideline]($GUIDE)"
+              ID=$(echo "$issue" | jq -r '.check_id // "N/A"')
+              NAME=$(echo "$issue" | jq -r '.check_name // "Check violation"')
+              GUIDE=$(echo "$issue" | jq -r '.guideline // ""')
+              MSG="**$ID**: $NAME"
+              if [[ "$GUIDE" != "" && "$GUIDE" != "null" ]]; then
+                MSG="${MSG}\n[Guideline](${GUIDE})"
+              fi
 
-              # Only comment if file is in changed_files.txt
               if grep -qx "$FILE" changed_files.txt; then
                 if [[ -n "$FILE" && "$FILE" != "null" && "$FILE" != "" ]] && \
                    [[ -n "$LINE" && "$LINE" =~ ^[0-9]+$ ]] && \
                    [[ -n "$ID" && "$ID" != "null" ]]; then
-
                   echo "Posting review comment: $MSG on $FILE:$LINE"
                   curl -s -X POST \
                     -H "Authorization: Bearer $GITHUB_TOKEN" \
@@ -84,10 +81,10 @@ jobs:
                       \"line\": $LINE
                     }"
                 else
-                  echo "Skipping error due to invalid path/line/fields: file=$FILE line=$LINE check_id=$ID"
+                  echo "Skipping invalid entry: file=$FILE line=$LINE check_id=$ID"
                 fi
               else
-                echo "Skipping $FILE (not in PR diff)"
+                echo "Skipping $FILE:$LINE (not in PR diff)"
               fi
             done
           else
