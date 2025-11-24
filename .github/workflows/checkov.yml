@@ -1,20 +1,19 @@
-name: Custom Policy Security Scan
+name: Checkov Custom Policy Scan
 
 on:
   pull_request:
-    branches:
-      - main
+    branches: [ main ]
 
 permissions:
   contents: read
   pull-requests: write
 
 jobs:
-  custom-security-scan:
+  checkov_custom:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout Code
+      - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Set up Python
@@ -25,93 +24,161 @@ jobs:
       - name: Install Checkov
         run: pip install checkov
 
-      - name: Run Checkov (built-in and custom checks)
+      - name: Install GitHub CLI
+        run: sudo apt-get install gh
+
+      - name: Run Checkov Scan (custom + built-in)
         run: |
           checkov -d . \
             --external-checks-dir ./custom-policies \
             -o json > checkov-report.json || true
 
-      - name: Run Python ARN version pin check
+      - name: Run Python ARN Version Check
         run: |
-          python check_python_arn_version.py --output-json pyarn-report.json || true
+          python check_python_arn_version.py > pyarn-report.txt || true
 
-      - name: Format Reports
+      # ===================================================================
+      # 🔥 INLINE PR COMMENTS JUST LIKE YOUR EXAMPLE WORKFLOW
+      # ===================================================================
+      - name: Post Inline PR Comments for Checkov Failures
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          COMMIT_ID: ${{ github.event.pull_request.head.sha }}
         run: |
-          echo "# :shield: Custom Policy Security Scan Report" > report.md
-          echo "" >> report.md
+          if jq -e '.results.failed_checks | length > 0' checkov-report.json >/dev/null; then
+            jq -c '.results.failed_checks[]' checkov-report.json | while read -r issue; do
+              
+              PATH_TO_FILE=$(echo "$issue" | jq -r '.file_path')
+              LINE=$(echo "$issue" | jq -r '.file_line_range[0]')
+              BODY=$(echo "$issue" | jq -r '.check_id + ": " + .check_name')
 
-          # Checkov Results
-          CHECKOV_JSON="checkov-report.json"
-          CHECKOV_PASSED=$(jq '.summary.passed' "$CHECKOV_JSON" 2>/dev/null || echo "0")
-          CHECKOV_FAILED=$(jq '.summary.failed' "$CHECKOV_JSON" 2>/dev/null || echo "0")
-          CHECKOV_SKIPPED=$(jq '.summary.skipped' "$CHECKOV_JSON" 2>/dev/null || echo "0")
-          
-          echo "## 1️⃣ Checkov Report" >> report.md
-          echo "- 🟢 **PASSED Checks:** $CHECKOV_PASSED" >> report.md
-          echo "- 🔴 **FAILED Checks:** $CHECKOV_FAILED" >> report.md
-          echo "- ⚠️  **SKIPPED Checks:** $CHECKOV_SKIPPED" >> report.md
-          echo "" >> report.md
+              # Ensure valid inline comment fields
+              if [[ "$PATH_TO_FILE" != "null" && "$LINE" != "null" ]]; then
 
-          # Detailed Checkov Failures
-          echo "### :cloud: Checkov Detailed Failures" >> report.md
-          if [ -f "$CHECKOV_JSON" ]; then
-            FAILED=$(jq '.results.failed_checks | length' "$CHECKOV_JSON" 2>/dev/null || echo "0")
-            if [ "$FAILED" -gt 0 ]; then
-              jq -r '
-                .results.failed_checks[]? |
-                "- **" + (.check_id // "N/A") + ":** " + (.check_name // "N/A") + "\n" +
-                (
-                  if (.file_path // "") != "" and
-                     ((.file_line_range | type) == "array" and (.file_line_range | length) > 0)
-                  then
-                    "  - **Location:** `" + (.file_path | ltrimstr("/")) + ":" + ((.file_line_range[0]|tostring) // "?") + "`\n"
-                  elif .resource_address then
-                    "  - **Resource:** `" + .resource_address + "`\n"
-                  else "" end
-                ) +
-                "  - **Severity:** " + ((.severity // "N/A")) + "\n" +
-                "  - **Guideline:** " + ((.guideline // "N/A")) + "\n" +
-                "  - **Description:** " + ((.description // .check_name // "No description provided.")) + "\n"
-              ' "$CHECKOV_JSON" >> report.md
-            else
-              echo ":white_check_mark: **No failed infrastructure checks found!**" >> report.md
-            fi
+                # The path must match exactly as shown in PR diff
+                DISPLAY_PATH="${PATH_TO_FILE#./}"
+
+                echo "Posting Checkov comment → $DISPLAY_PATH:$LINE"
+
+                curl -s -X POST \
+                  -H "Authorization: Bearer $GH_TOKEN" \
+                  -H "Accept: application/vnd.github+json" \
+                  "https://api.github.com/repos/$REPO/pulls/$PR/comments" \
+                  -d "{
+                      \"body\": \"$BODY\",
+                      \"commit_id\": \"$COMMIT_ID\",
+                      \"path\": \"$DISPLAY_PATH\",
+                      \"line\": $LINE
+                  }"
+              fi
+            done
           else
-            echo ":warning: Checkov report not generated." >> report.md
+            echo "No Checkov failures found."
+          fi
+
+      - name: Post Inline PR Comments for Python ARN Violations
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          COMMIT_ID: ${{ github.event.pull_request.head.sha }}
+        run: |
+          n=1
+          while IFS= read -r line; do
+            if [[ -n "$line" ]]; then
+              FILE=$(echo "$line" | awk '{print $1}')
+              LINENUM=$(echo "$line" | awk '{print $2}')
+              BODY="Python ARN Check: ${line}"
+
+              DISPLAY_PATH="${FILE#./}"
+
+              echo "Posting Python ARN comment → $DISPLAY_PATH:$LINENUM"
+
+              curl -s -X POST \
+                -H "Authorization: Bearer $GH_TOKEN" \
+                -H "Accept: application/vnd.github+json" \
+                "https://api.github.com/repos/$REPO/pulls/$PR/comments" \
+                -d "{
+                  \"body\": \"$BODY\",
+                  \"commit_id\": \"$COMMIT_ID\",
+                  \"path\": \"$DISPLAY_PATH\",
+                  \"line\": $LINENUM
+                }"
+            fi
+          done < pyarn-report.txt
+
+      # ===================================================================
+      # 🔥 EXACT REPORT OUTPUT STYLE FROM YOUR EXAMPLE WORKFLOW
+      # ===================================================================
+      - name: Generate Security Report
+        run: |
+          echo "# :shield: Security Scan Report" > report.md
+          echo "" >> report.md
+
+          CK_FAILED=$(jq '.results.failed_checks | length' checkov-report.json 2>/dev/null || echo 0)
+          CK_PASSED=$(jq '.results.passed_checks | length' checkov-report.json 2>/dev/null || echo 0)
+          CK_SKIPPED=$(jq '.results.skipped_checks | length' checkov-report.json 2>/dev/null || echo 0)
+          PY_FAILED=$(grep -cve '^\s*$' pyarn-report.txt || echo 0)
+
+          echo "1️⃣ **Checkov Report**" >> report.md
+          echo "   - 🟢 **PASSED Checks:** $CK_PASSED" >> report.md
+          echo "   - 🔴 **FAILED Checks:** $CK_FAILED" >> report.md
+          echo "   - ⚠️ **SKIPPED Checks:** $CK_SKIPPED" >> report.md
+          echo "" >> report.md
+
+          echo "2️⃣ **Python ARN Version Check**" >> report.md
+          echo "   - 🔴 **Violations:** $PY_FAILED" >> report.md
+          echo "" >> report.md
+
+          if [ "$CK_FAILED" -eq 0 ] && [ "$PY_FAILED" -eq 0 ]; then
+            echo ":white_check_mark: Everything looks secure. Great job! 🔐" >> report.md
+          else
+            echo "*⚡️ Every 🔴 is a risk bomb. Defuse before you MERGE!*" >> report.md
+          fi
+          echo "" >> report.md
+          echo "---" >> report.md
+          echo "" >> report.md
+
+          echo "## :cloud: Checkov Detailed Report" >> report.md
+          echo "" >> report.md
+
+          if [ "$CK_FAILED" -gt 0 ]; then
+            jq -r '
+              .results.failed_checks[] |
+              "### " + .check_id + "\n" +
+              "- **Name:** " + .check_name + "\n" +
+              "- **File:** `" + .file_path + "`" + "\n" +
+              "- **Line:** " + (.file_line_range[0] | tostring) + "\n" +
+              "- **Severity:** " + (.severity // "N/A") + "\n" +
+              "- **Guideline:** " + (.guideline // "N/A") + "\n" +
+              "- **Description:** " + (.description // "No description") + "\n---"
+            ' checkov-report.json >> report.md
+          else
+            echo ":white_check_mark: **No Checkov issues found!**" >> report.md
           fi
 
           echo "" >> report.md
           echo "---" >> report.md
-
-          # Python ARN Report
-          echo "## 2️⃣ Python ARN Version Scan" >> report.md
-          PYARN_JSON="pyarn-report.json"
-          PYARN_FAILED=$(jq '.failures | length' "$PYARN_JSON" 2>/dev/null || echo "0")
-          echo "- 🔴 **FAILED Checks:** $PYARN_FAILED" >> report.md
           echo "" >> report.md
 
-          # Detailed Python ARN Failures
-          if [ -f "$PYARN_JSON" ]; then
-            COUNT=$(jq '.failures | length' "$PYARN_JSON" 2>/dev/null || echo "0")
-            if [ "$COUNT" -gt 0 ]; then
-              jq -r '
-                .failures[] |
-                "- **File:** " + (.file // "N/A") + "\n" +
-                "  - **Line:** " + ((.line | tostring) // "?") + "\n" +
-                "  - **Issue:** " + (.issue // "N/A") + "\n"
-              ' "$PYARN_JSON" >> report.md
-            else
-              echo ":white_check_mark: **No Python ARN issues found!**" >> report.md
-            fi
+          echo "## :snake: Python ARN Detailed Report" >> report.md
+          echo "" >> report.md
+
+          if [ "$PY_FAILED" -gt 0 ]; then
+            while IFS= read -r line; do
+              echo "- $line" >> report.md
+            done < pyarn-report.txt
           else
-            echo ":warning: Python ARN report not generated." >> report.md
+            echo ":white_check_mark: **No ARN version issues found!**" >> report.md
           fi
 
           echo "" >> report.md
           echo "---" >> report.md
-          echo "*This report was generated automatically by the Custom Policy Security Scan Pipeline*" >> report.md
+          echo "*Generated automatically by Security Scan Pipeline*" >> report.md
 
-      - name: Post Scan Summary to PR
+      - name: Post Security Scan Summary to PR
         uses: marocchino/sticky-pull-request-comment@v2
         with:
           path: report.md
