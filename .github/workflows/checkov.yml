@@ -24,8 +24,9 @@ jobs:
         with:
           python-version: '3.9'
 
-      - name: Install Checkov
-        run: pip install checkov
+      - name: Install Checkov and dependencies
+        run: |
+          pip install checkov jq
 
       - name: Run Checkov with built-in and custom checks
         run: |
@@ -33,37 +34,29 @@ jobs:
             --external-checks-dir ./custom-policies \
             --compact \
             -o json > checkov-report.json
-        continue-on-error: true
-
-      - name: Run Python ARN version pin check
-        run: python check_python_arn_version.py || true
-        continue-on-error: true
+        continue-on-error: true # Do not fail pipeline on policy violation
 
       - name: Format Security Scan Markdown
         run: |
-          echo "# :shield: Security Scan Report" > report.md
-          echo "" >> report.md
+          echo "# 🛡️ Security Scan Report" > report.md
           CHECKOV_JSON="checkov-report.json"
           CHECKOV_PASSED=$(jq '.summary.passed' "$CHECKOV_JSON" 2>/dev/null || echo "0")
           CHECKOV_FAILED=$(jq '.summary.failed' "$CHECKOV_JSON" 2>/dev/null || echo "0")
           CHECKOV_SKIPPED=$(jq '.summary.skipped' "$CHECKOV_JSON" 2>/dev/null || echo "0")
           {
               echo "1️⃣ **Checkov Report**"
-              echo "   - 🟢 **PASSED Checks:** $CHECKOV_PASSED"
-              echo "   - 🔴 **FAILED Checks:** $CHECKOV_FAILED"
-              echo "   - ⚠️  **SKIPPED Checks:** $CHECKOV_SKIPPED"
+              echo "🟢 PASSED Checks: $CHECKOV_PASSED"
+              echo "🔴 FAILED Checks: $CHECKOV_FAILED"
+              echo "⚠️ SKIPPED Checks: $CHECKOV_SKIPPED"
               echo ""
               if [ "$CHECKOV_FAILED" -eq 0 ]; then
-                  echo ":white_check_mark: Everything looks secure. Great job! 🔐"
+                  echo "✅ Everything looks secure. Great job! 🔐"
               else
                   echo "*⚡️ Every 🔴 is a risk bomb. Defuse before you MERGE!*"
               fi
               echo ""
-              echo "---"
-              echo ""
           } >> report.md
-          echo "## :cloud: Checkov Detailed Report" >> report.md
-          echo "" >> report.md
+          echo "☁️ Checkov Detailed Report" >> report.md
           if [ -f "$CHECKOV_JSON" ]; then
               FAILED=$(jq '.results.failed_checks | length' "$CHECKOV_JSON" 2>/dev/null || echo "0")
               if [ "$FAILED" -gt 0 ]; then
@@ -72,7 +65,7 @@ jobs:
                       "- **" + (.check_id // "N/A") + ":** " + (.check_name // "N/A") + "\n" +
                       (
                           if (.file_path // "") != "" and
-                          ((.file_line_range | type) == "array" and (.file_line_range | length) > 0)
+                             ((.file_line_range | type) == "array" and (.file_line_range | length) > 0)
                           then
                               "  - **Location:** `" + (.file_path | ltrimstr("/")) + ":" + ((.file_line_range[0]|tostring) // "?") + "`\n"
                           elif .resource_address then
@@ -83,11 +76,10 @@ jobs:
                       "  - **Description:** " + ((.description // .check_name // "No description provided.")) + "\n"
                   ' "$CHECKOV_JSON" >> report.md
               else
-                  echo ":white_check_mark: **No failed infrastructure checks found!**" >> report.md
+                  echo "✅ No failed infrastructure checks found!" >> report.md
               fi
           fi
           echo "" >> report.md
-          echo "---" >> report.md
           echo "*This report was generated automatically by the Security Scan Pipeline*" >> report.md
 
       - name: Write Report to Job Summary
