@@ -30,6 +30,11 @@ jobs:
           checkov -d . --external-checks-dir ./custom-policies --quiet -o json > checkov_results.json || true
         continue-on-error: true
 
+      - name: Run check_python_arn_version.py
+        run: |
+          python check_python_arn_version.py > arn_results.json || true
+        continue-on-error: true
+
       - name: Get Changed Files
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -89,4 +94,42 @@ jobs:
             done
           else
             echo "No failed Checkov checks found."
+          fi
+
+      - name: Post Python ARN Review Comments
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          COMMIT_ID: ${{ github.event.pull_request.head.sha }}
+        run: |
+          # Detect whether arn_results.json is JSON or plain text
+          if [ -f arn_results.json ] && jq -e 'type' arn_results.json > /dev/null 2>&1; then
+            # Assuming arn_results.json is a JSON array of {"file": "sample.py", "line": 10, "msg": "message"}
+            jq -c '.[]' arn_results.json | while read -r issue; do
+              FILE=$(echo "$issue" | jq -r '.file')
+              LINE=$(echo "$issue" | jq -r '.line')
+              MSG=$(echo "$issue" | jq -r '.msg')
+              if grep -qx "$FILE" changed_files.txt; then
+                if [[ -n "$FILE" && -n "$LINE" && -n "$MSG" ]]; then
+                  echo "Posting ARN review comment: $MSG on $FILE:$LINE"
+                  curl -s -X POST \
+                    -H "Authorization: Bearer $GITHUB_TOKEN" \
+                    -H "Accept: application/vnd.github+json" \
+                    "https://api.github.com/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/comments" \
+                    -d "{
+                      \"body\": \"$MSG\",
+                      \"commit_id\": \"$COMMIT_ID\",
+                      \"path\": \"$FILE\",
+                      \"line\": $LINE
+                    }"
+                else
+                  echo "Skipping: file=$FILE line=$LINE msg=$MSG"
+                fi
+              else
+                echo "Skipping $FILE (not in PR diff)"
+              fi
+            done
+          else
+            echo "No ARN scan issues found or output is not a JSON array."
           fi
