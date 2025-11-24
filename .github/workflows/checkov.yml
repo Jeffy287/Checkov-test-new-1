@@ -54,7 +54,7 @@ jobs:
           cat arn_results.json || echo "arn_results.json not found"
           echo "==== End ARN RESULTS ===="
 
-      - name: Post Checkov Inline Review Comments (with debug and escaping)
+      - name: Post Checkov Inline Review Comments (with code lines, debug, and escaping)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
@@ -77,8 +77,16 @@ jobs:
               ID=$(echo "$issue" | jq -r '.check_id // "N/A"')
               NAME=$(echo "$issue" | jq -r '.check_name // "Check violation"')
               GUIDE=$(echo "$issue" | jq -r '.guideline // ""')
-              # Use real newlines for multi-line messages
+              # Get the actual line of code flagged, if file exists
+              LINE_CONTENT=""
+              if [[ -f "$FILE" && "$LINE" =~ ^[0-9]+$ ]]; then
+                LINE_CONTENT=$(sed -n "${LINE}p" "$FILE" 2>/dev/null)
+              fi
+              # Build message with real newlines
               MSG="**$ID**: $NAME"
+              if [[ "$LINE_CONTENT" != "" ]]; then
+                MSG="${MSG}"$'\n'"$LINE_CONTENT"
+              fi
               if [[ "$GUIDE" != "" && "$GUIDE" != "null" ]]; then
                 MSG="${MSG}"$'\n'"[Guideline](${GUIDE})"
               fi
