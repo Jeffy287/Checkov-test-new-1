@@ -50,7 +50,7 @@ jobs:
           cat arn_results.json || echo "arn_results.json not found"
           echo "==== End ARN RESULTS ===="
 
-      - name: Post Python ARN Review Comments (with full debug)
+      - name: Post Python ARN Review Comments (with full debug and escaping)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
@@ -65,13 +65,15 @@ jobs:
               echo "DEBUG: Issue FILE=$FILE LINE=$LINE MSG=$MSG"
               if grep -qx "$FILE" changed_files.txt; then
                 if [[ -n "$FILE" && -n "$LINE" && -n "$MSG" ]]; then
+                  # Safely escape message for valid JSON API payload
+                  MSG_ESCAPED=$(printf '%s' "$MSG" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')
                   echo "DEBUG: Attempting to post ARN review comment for $FILE:$LINE"
                   CURLRESP=$(curl -s -X POST \
                     -H "Authorization: Bearer $GITHUB_TOKEN" \
                     -H "Accept: application/vnd.github+json" \
                     "https://api.github.com/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/comments" \
                     -d "{
-                      \"body\": \"$MSG\",
+                      \"body\": $MSG_ESCAPED,
                       \"commit_id\": \"$COMMIT_ID\",
                       \"path\": \"$FILE\",
                       \"line\": $LINE
