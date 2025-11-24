@@ -64,27 +64,38 @@ jobs:
 
       - name: Split Python File Violations
         run: |
-          # Each line in pyarn_results.txt represents a separate violation.
           n=0
           while IFS= read -r line; do
             n=$((n+1))
             echo "$line" > "pyarn_error_block_$n.txt"
           done < pyarn_results.txt
 
-      - name: Comment built-in policy results
-        uses: marocchino/sticky-pull-request-comment@v2
-        with:
-          path: builtin_error_block_*.txt
-        if: always()
+      - name: Post each built-in error as comment
+        run: |
+          for file in builtin_error_block_*.txt; do
+            if [ -s "$file" ]; then
+              echo "::group::Posting $file"
+              gh pr comment ${{ github.event.pull_request.number }} --body-file "$file"
+              echo "::endgroup::"
+            fi
+          done
 
-      - name: Comment custom policy results
-        uses: marocchino/sticky-pull-request-comment@v2
-        with:
-          path: custom_error_block_*.txt
-        if: always()
+      - name: Post each custom error as comment
+        run: |
+          for file in custom_error_block_*.txt; do
+            if [ -s "$file" ]; then
+              echo "::group::Posting $file"
+              gh pr comment ${{ github.event.pull_request.number }} --body-file "$file"
+              echo "::endgroup::"
+            fi
+          done
 
-      - name: Comment Python violation results
-        uses: marocchino/sticky-pull-request-comment@v2
-        with:
-          path: pyarn_error_block_*.txt
-        if: always()
+      - name: Post each Python violation as comment
+        run: |
+          for file in pyarn_error_block_*.txt; do
+            if [ -s "$file" ]; then
+              echo "::group::Posting $file"
+              gh pr comment ${{ github.event.pull_request.number }} --body-file "$file"
+              echo "::endgroup::"
+            fi
+          done
