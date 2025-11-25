@@ -3,16 +3,14 @@ import re
 import json
 import argparse
 
-# Improved regex: detects :<number> at the end of ARN, regardless of whitespace/quote
-VERSION_PATTERN = re.compile(r'arn:aws:[^"\']*:\d+\b')
+# Regex: matches ARN ending with :<number> before quote, whitespace, or end of string
+VERSION_PATTERN = re.compile(r'arn:aws:[^"\'\s]*:\d+(?=["\'\s]|$)')
 
-# Directories to exclude from scan
 EXCLUDED_DIRS = {'.venv', '.git', '__pycache__'}
 
 def find_python_files(root_dir="."):
     py_files = []
     for root, dirs, files in os.walk(root_dir):
-        # Exclude unwanted directories in-place
         dirs[:] = [d for d in dirs if d not in EXCLUDED_DIRS]
         for f in files:
             if f.endswith(".py"):
@@ -37,9 +35,7 @@ def main():
     parser.add_argument("directory", nargs="?", default=".", help="Root directory to scan (default: current directory)")
     args = parser.parse_args()
     
-    # For local logging of unreadable files
     logger = open("scan_debug.log", "w", encoding="utf-8")
-
     py_files = find_python_files(args.directory)
     issues = []
 
@@ -55,7 +51,6 @@ def main():
 
     with open("arn_results.json", "w", encoding="utf-8") as outfile:
         json.dump(issues, outfile, indent=2)
-
     logger.close()
 
     if issues:
