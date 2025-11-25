@@ -1,22 +1,23 @@
 import os
 import re
+import json
+import argparse
 
-# FIXED REGEX: matches ANY ARN ending with :<number>
-VERSION_PATTERN = re.compile(
-    r'arn:aws:[^"\']*:\d+(?=["\'\s])'
-)
+# Regex: matches ARN ending with :<number> before quote, whitespace, or end of string
+VERSION_PATTERN = re.compile(r'arn:aws:[^"\'\s]*:\d+(?=["\'\s]|$)')
+
+EXCLUDED_DIRS = {'.venv', '.git', '__pycache__'}
 
 def find_python_files(root_dir="."):
-    """Recursively collect all .py files."""
     py_files = []
-    for root, _, files in os.walk(root_dir):
+    for root, dirs, files in os.walk(root_dir):
+        dirs[:] = [d for d in dirs if d not in EXCLUDED_DIRS]
         for f in files:
             if f.endswith(".py"):
                 py_files.append(os.path.join(root, f))
     return py_files
 
-def scan_file_for_pinned_arns(file_path):
-    """Return all version-pinned ARNs found in a file."""
+def scan_file_for_pinned_arns(file_path, logger=None):
     matches = []
     try:
         with open(file_path, "r", encoding="utf-8") as f:
@@ -24,36 +25,38 @@ def scan_file_for_pinned_arns(file_path):
                 found = VERSION_PATTERN.findall(line)
                 if found:
                     matches.append((line_no, line.strip(), found))
-    except (UnicodeDecodeError, PermissionError):
-        pass
+    except (UnicodeDecodeError, PermissionError) as e:
+        if logger:
+            logger.write(f"Skipping unreadable file: {file_path} ({e})\n")
     return matches
 
 def main():
-    print("\nScanning Python files for version-pinned ARNs...\n")
-
-    py_files = find_python_files(".")
-    report = {}
+    parser = argparse.ArgumentParser(description="Scan Python files for version-pinned ARNs.")
+    parser.add_argument("directory", nargs="?", default=".", help="Root directory to scan (default: current directory)")
+    args = parser.parse_args()
+    
+    logger = open("scan_debug.log", "w", encoding="utf-8")
+    py_files = find_python_files(args.directory)
+    issues = []
 
     for py_file in py_files:
-        matches = scan_file_for_pinned_arns(py_file)
-        if matches:
-            report[py_file] = matches
-
-    if not report:
-        print("No version-pinned ARNs found in any .py file.")
-        return
-
-    print("Version-pinned ARNs detected:\n")
-
-    for file_path, entries in report.items():
-        print(f"File: {file_path}")
-        for line_no, line, arns in entries:
-            print(f"  - Line {line_no}: {line}")
+        matches = scan_file_for_pinned_arns(py_file, logger)
+        for line_no, line, arns in matches:
             for arn in arns:
-                print(f"      -> {arn}")
-        print()
+                issues.append({
+                    "file": os.path.relpath(py_file, args.directory),
+                    "line": line_no,
+                    "msg": f"Version-pinned ARN detected: {arn}\n{line}"
+                })
 
-    print("Recommendation: Remove version pinning from ARNs.\n")
+    with open("arn_results.json", "w", encoding="utf-8") as outfile:
+        json.dump(issues, outfile, indent=2)
+    logger.close()
+
+    if issues:
+        print(f"Found {len(issues)} version-pinned ARN(s): see arn_results.json for details.")
+    else:
+        print("No version-pinned ARNs found.")
 
 if __name__ == "__main__":
     main()

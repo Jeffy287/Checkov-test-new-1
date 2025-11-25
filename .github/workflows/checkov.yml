@@ -1,35 +1,159 @@
-name: Checkov Custom Policy Scan
+name: Checkov Custom Policy Inline Review
 
 on:
-  push:
-    branches:
-      - main
   pull_request:
-    branches:
-      - main
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
 
 jobs:
   checkov_custom:
+    if: |
+      (startsWith(github.head_ref, 'feature/') && github.base_ref == 'develop') ||
+      (github.head_ref == 'develop' && github.base_ref == 'stage') ||
+      (github.head_ref == 'stage' && github.base_ref == 'main')
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Set up Python environment
         uses: actions/setup-python@v5
         with:
           python-version: '3.9'
 
-      - name: Install Checkov
-        run: pip install checkov
-
-      - name: Run Checkov with built-in and custom checks
+      - name: Install Checkov, jq, and GitHub CLI
         run: |
-          checkov -d . \
-            --external-checks-dir ./custom-policies \
-            --compact
+          pip install checkov
+          sudo apt-get update && sudo apt-get install -y jq gh
+
+      - name: Run Checkov (JSON output)
+        run: |
+          checkov -d . --external-checks-dir ./custom-policies --quiet -o json > checkov_results.json || true
         continue-on-error: true
 
-      - name: Run Python ARN version pin check
-        run: python check_python_arn_version.py
+      - name: Run Python ARN Scan
+        run: |
+          python check_python_arn_version.py
         continue-on-error: true
+
+      - name: Get Changed Files (Debug)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          gh pr diff $PR_NUMBER --name-only | sed 's|^./||' | sort | uniq > changed_files.txt
+          echo "==== CHANGED FILES ===="
+          cat changed_files.txt
+
+      - name: Debug Output of ARN Scan
+        run: |
+          echo "==== ARN RESULTS ===="
+          cat arn_results.json || echo "arn_results.json not found"
+          echo "==== End ARN RESULTS ===="
+
+      - name: Post Checkov Inline Review Comments (with code lines, debug, and escaping)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          COMMIT_ID: ${{ github.event.pull_request.head.sha }}
+        run: |
+          IS_ARRAY=$(jq 'type=="array"' checkov_results.json)
+          if [ "$IS_ARRAY" = "true" ]; then
+            JQ_ROOT='.[].results.failed_checks[]'
+            HAS_FAILS=$(jq 'reduce .[].results.failed_checks[] as $item (0; .+1)' checkov_results.json)
+          else
+            JQ_ROOT='.results.failed_checks[]'
+            HAS_FAILS=$(jq '.results.failed_checks | length' checkov_results.json)
+          fi
+
+          if [ "$HAS_FAILS" -gt 0 ]; then
+            jq -c "$JQ_ROOT" checkov_results.json | while read -r issue; do
+              FILE=$(echo "$issue" | jq -r '.file_path' | sed 's|^/||')
+              LINE=$(echo "$issue" | jq -r '.file_line_range[0]')
+              ID=$(echo "$issue" | jq -r '.check_id // "N/A"')
+              NAME=$(echo "$issue" | jq -r '.check_name // "Check violation"')
+              GUIDE=$(echo "$issue" | jq -r '.guideline // ""')
+              # Get the actual line of code flagged, if file exists
+              LINE_CONTENT=""
+              if [[ -f "$FILE" && "$LINE" =~ ^[0-9]+$ ]]; then
+                LINE_CONTENT=$(sed -n "${LINE}p" "$FILE" 2>/dev/null)
+              fi
+              # Build message with real newlines
+              MSG="**$ID**: $NAME"
+              if [[ "$LINE_CONTENT" != "" ]]; then
+                MSG="${MSG}"$'\n'"$LINE_CONTENT"
+              fi
+              if [[ "$GUIDE" != "" && "$GUIDE" != "null" ]]; then
+                MSG="${MSG}"$'\n'"[Guideline](${GUIDE})"
+              fi
+              MSG_ESCAPED=$(printf '%s' "$MSG" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')
+              echo "DEBUG: Issue FILE=$FILE LINE=$LINE ESCAPED_MSG=$MSG_ESCAPED"
+              if grep -qx "$FILE" changed_files.txt; then
+                if [[ -n "$FILE" && "$FILE" != "null" && "$FILE" != "" ]] && \
+                   [[ -n "$LINE" && "$LINE" =~ ^[0-9]+$ ]] && \
+                   [[ -n "$ID" && "$ID" != "null" ]]; then
+                  echo "DEBUG: Attempting to post Checkov review comment for $FILE:$LINE"
+                  CURLRESP=$(curl -s -X POST \
+                    -H "Authorization: Bearer $GITHUB_TOKEN" \
+                    -H "Accept: application/vnd.github+json" \
+                    "https://api.github.com/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/comments" \
+                    -d "{
+                      \"body\": $MSG_ESCAPED,
+                      \"commit_id\": \"$COMMIT_ID\",
+                      \"path\": \"$FILE\",
+                      \"line\": $LINE
+                    }")
+                  echo "DEBUG: curl response: $CURLRESP"
+                else
+                  echo "DEBUG: Skipping invalid entry: file=$FILE line=$LINE check_id=$ID"
+                fi
+              else
+                echo "DEBUG: Skipping $FILE (not in PR diff)"
+              fi
+            done
+          else
+            echo "DEBUG: No failed Checkov checks found."
+          fi
+
+      - name: Post Python ARN Review Comments (with debug and escaping)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          COMMIT_ID: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ -f arn_results.json ] && jq -e 'type=="array"' arn_results.json > /dev/null 2>&1; then
+            jq -c '.[]' arn_results.json | while read -r issue; do
+              FILE=$(echo "$issue" | jq -r '.file')
+              LINE=$(echo "$issue" | jq -r '.line')
+              MSG=$(echo "$issue" | jq -r '.msg')
+              echo "DEBUG: Issue FILE=$FILE LINE=$LINE MSG=$MSG"
+              if grep -qx "$FILE" changed_files.txt; then
+                if [[ -n "$FILE" && -n "$LINE" && -n "$MSG" ]]; then
+                  MSG_ESCAPED=$(printf '%s' "$MSG" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')
+                  echo "DEBUG: Attempting to post ARN review comment for $FILE:$LINE"
+                  CURLRESP=$(curl -s -X POST \
+                    -H "Authorization: Bearer $GITHUB_TOKEN" \
+                    -H "Accept: application/vnd.github+json" \
+                    "https://api.github.com/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/comments" \
+                    -d "{
+                      \"body\": $MSG_ESCAPED,
+                      \"commit_id\": \"$COMMIT_ID\",
+                      \"path\": \"$FILE\",
+                      \"line\": $LINE
+                    }")
+                  echo "DEBUG: curl response: $CURLRESP"
+                else
+                  echo "DEBUG: Skipping, missing data: file=$FILE line=$LINE msg=$MSG"
+                fi
+              else
+                echo "DEBUG: Skipping $FILE (not in PR diff)"
+              fi
+            done
+          else
+            echo "DEBUG: No ARN scan issues found or arn_results.json is not a JSON array."
+          fi

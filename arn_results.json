@@ -1,0 +1,17 @@
+[
+  {
+    "file": "sample_test.py",
+    "line": 2,
+    "msg": "Version-pinned ARN detected: arn:aws:iam::123456789012:role/lambda-role:9\nmy_bad_role_arn = \"arn:aws:iam::123456789012:role/lambda-role:9\""
+  },
+  {
+    "file": "sample_test.py",
+    "line": 8,
+    "msg": "Version-pinned ARN detected: arn:aws:lambda:us-east-1:123456789012:layer:my-layer:6\nmy_layer_arn = \"arn:aws:lambda:us-east-1:123456789012:layer:my-layer:6\""
+  },
+  {
+    "file": "sample_test.py",
+    "line": 15,
+    "msg": "Version-pinned ARN detected: arn:aws:iam::123456789012:role/application-role:3\n\"arn:aws:iam::123456789012:role/application-role:3\",  # should be flagged"
+  }
+]
