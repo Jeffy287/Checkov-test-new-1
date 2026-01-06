@@ -1,35 +1,843 @@
-name: Checkov Custom Policy Scan
+name: Security Scan
 
 on:
-  push:
-    branches:
-      - main
   pull_request:
-    branches:
-      - main
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+  id-token: write
 
 jobs:
-  checkov_custom:
+  security-scan:
+    if: |
+      (startsWith(github.head_ref, 'feature/') && github.base_ref == 'develop') || (github.head_ref == 'develop' && github.base_ref == 'uat') || (github.head_ref == 'uat' && github.base_ref == 'main')
     runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          python-version: '3.9'
+          role-to-assume: arn:aws:iam::302263040839:role/Githubactions
+          aws-region: ap-south-1
+
+      - name: Install prerequisites
+        run: sudo apt-get update && sudo apt-get install -y jq curl wget
+
+      # --------- SonarQube Steps ----------
+      - name: Install SonarScanner CLI
+        run: |
+          wget https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-5.0.1.3006-linux.zip
+          unzip sonar-scanner-cli-5.0.1.3006-linux.zip
+          mv sonar-scanner-5.0.1.3006-linux sonar-scanner
+          echo "$PWD/sonar-scanner/bin" >> $GITHUB_PATH
+
+      - name: Run SonarQube Scan (using sonar-project.properties)
+        run: |
+          sonar-scanner
+
+      - name: Fetch SonarQube Issues (read settings from sonar-project.properties)
+        run: |
+          SONAR_HOST_URL=$(grep '^sonar.host.url=' sonar-project.properties | cut -d'=' -f2-)
+          SONAR_TOKEN=$(grep '^sonar.token=' sonar-project.properties | cut -d'=' -f2-)
+          SONAR_PROJECT_KEY=$(grep '^sonar.projectKey=' sonar-project.properties | cut -d'=' -f2-)
+
+          echo "HOST: $SONAR_HOST_URL"
+          echo "PROJECT: $SONAR_PROJECT_KEY"
+
+          curl -s -u "${SONAR_TOKEN}:" \
+            "$SONAR_HOST_URL/api/issues/search?componentKeys=$SONAR_PROJECT_KEY&ps=500" > sonar_issues.json
+          echo "Sonar issues JSON (total, count):"
+          jq '.total, .issues | length' sonar_issues.json || true
+
+      # --------- Bandit Steps ----------
+      - name: Run Bandit Scan
+        run: |
+          pip install bandit
+          bandit -r . -f json -o bandit-report.json || true
+
+      # --------- Trivy Steps ----------
+      - name: Install Trivy
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget apt-transport-https gnupg lsb-release
+          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+          echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/trivy.list
+          sudo apt-get update
+          sudo apt-get install -y trivy
+
+      - name: Run Trivy Dockerfile Scan
+        run: |
+          trivy config --severity HIGH,CRITICAL --format json --output trivy-report.json Dockerfile || true
+
+      # --------- Hadolint Steps ----------
+      - name: Install Hadolint
+        run: |
+          wget -O hadolint https://github.com/hadolint/hadolint/releases/latest/download/hadolint-Linux-x86_64
+          chmod +x hadolint
+          sudo mv hadolint /usr/local/bin/hadolint
+
+      - name: Run Hadolint Scan
+        run: |
+          hadolint --format json Dockerfile > hadolint-report.json || true
+
+      # --------- Terraform + Checkov Steps ----------
+      - name: Check if Terraform folder exists
+        id: check_terraform
+        run: |
+          if [ -d "Terraform" ]; then
+            echo "terraform_exists=true" >> $GITHUB_OUTPUT
+            echo "✅ Terraform folder found"
+          else
+            echo "terraform_exists=false" >> $GITHUB_OUTPUT
+            echo "⚠️  Terraform folder not found, skipping Terraform/Checkov scans"
+          fi
+
+      - name: Set environment for Terraform plan
+        id: set_env
+        if: steps.check_terraform.outputs.terraform_exists == 'true'
+        run: |
+          if [[ "${{ github.head_ref }}" == feature/* && "${{ github.base_ref }}" == "develop" ]]; then
+            echo "TFVARS=dev.tfvars" >> $GITHUB_ENV
+          elif [[ "${{ github.head_ref }}" == "develop" && "${{ github.base_ref }}" == "main" ]]; then
+            echo "TFVARS=prod.tfvars" >> $GITHUB_ENV
+          else
+            echo "TFVARS=dev.tfvars" >> $GITHUB_ENV
+          fi
+
+      - name: Set up Terraform
+        if: steps.check_terraform.outputs.terraform_exists == 'true'
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Terraform Init
+        if: steps.check_terraform.outputs.terraform_exists == 'true'
+        run: terraform init
+        working-directory: Terraform
+
+      - name: Check for Third-Party Terraform Modules
+        if: steps.check_terraform.outputs.terraform_exists == 'true'
+        run: |
+          echo "🔍 Scanning for third-party Terraform modules..."
+          
+          # Define allowed module source patterns
+          # Add your approved module sources here
+          ALLOWED_PATTERNS=(
+            "^\.\/modules\/"           # Local modules in ./modules/
+            "^\.\.\/modules\/"         # Local modules in ../modules/
+            "^modules\/"               # Local modules in modules/
+            "^\.\/"                    # Any local relative path
+            "^\.\.\/"                  # Any parent directory relative path
+            # Add your specific approved registry modules here, for example:
+            # "^registry\.terraform\.io\/your-org\/"  # Your organization's registry
+            # "^your-approved-registry\.com\/"        # Your approved registry
+          )
+          
+          # Find all .tf files and extract module sources (only from module blocks, not provider blocks)
+          # Use awk to find module blocks and extract source values
+          MODULE_SOURCES=$(find . -name "*.tf" -type f -exec awk '
+            /^[[:space:]]*module[[:space:]]+"[^"]+"[[:space:]]*\{/ { in_module=1; next }
+            in_module && /^[[:space:]]*source[[:space:]]*=[[:space:]]*"/ {
+              gsub(/^[[:space:]]*source[[:space:]]*=[[:space:]]*"/, "")
+              gsub(/".*$/, "")
+              if ($0 != "") print $0
+            }
+            in_module && /^[[:space:]]*\}/ { in_module=0 }
+          ' {} \; | sort -u)
+          
+          if [ -z "$MODULE_SOURCES" ]; then
+            echo "✅ No module sources found in Terraform files"
+            exit 0
+          fi
+          
+          echo "Found module sources:"
+          echo "$MODULE_SOURCES"
+          echo ""
+          
+          # Check each module source against allowed patterns
+          UNAPPROVED_MODULES=()
+          while IFS= read -r source; do
+            if [ -z "$source" ]; then
+              continue
+            fi
+            
+            # Check if source matches any allowed pattern
+            APPROVED=false
+            for pattern in "${ALLOWED_PATTERNS[@]}"; do
+              if echo "$source" | grep -qE "$pattern"; then
+                APPROVED=true
+                echo "✅ Approved: $source (matches pattern: $pattern)"
+                break
+              fi
+            done
+            
+            if [ "$APPROVED" = false ]; then
+              UNAPPROVED_MODULES+=("$source")
+              echo "❌ Unapproved: $source"
+            fi
+          done <<< "$MODULE_SOURCES"
+          
+          # Fail if unapproved modules found
+          if [ ${#UNAPPROVED_MODULES[@]} -gt 0 ]; then
+            echo ""
+            echo "🚫 ERROR: Found ${#UNAPPROVED_MODULES[@]} unapproved third-party Terraform module(s):"
+            for module in "${UNAPPROVED_MODULES[@]}"; do
+              echo "   - $module"
+            done
+            echo ""
+            echo "Please use only approved modules. Approved patterns:"
+            for pattern in "${ALLOWED_PATTERNS[@]}"; do
+              echo "   - $pattern"
+            done
+            echo ""
+            echo "If you need to use a new module, please import it to the approved modules location first."
+            exit 1
+          else
+            echo ""
+            echo "✅ All Terraform modules are approved!"
+          fi
+        working-directory: Terraform
+
+      - name: Terraform Plan
+        if: steps.check_terraform.outputs.terraform_exists == 'true'
+        run: terraform plan -var-file=./environments/${TFVARS} -out=tfplan.binary
+        working-directory: Terraform
+
+      - name: Convert Plan to JSON
+        if: steps.check_terraform.outputs.terraform_exists == 'true'
+        run: terraform show -json tfplan.binary > tfplan.json
+        working-directory: Terraform
 
       - name: Install Checkov
+        if: steps.check_terraform.outputs.terraform_exists == 'true'
         run: pip install checkov
 
-      - name: Run Checkov with built-in and custom checks
-        run: |
-          checkov -d . \
-            --external-checks-dir ./custom-policies \
-            --compact
-        continue-on-error: true
+      - name: Run Checkov (scan plan with enrichment)
+        if: steps.check_terraform.outputs.terraform_exists == 'true'
+        run: checkov -f tfplan.json --repo-root-for-plan-enrichment . -o json > checkov-report.json || true
+        working-directory: Terraform
 
-      - name: Run Python ARN version pin check
-        run: python check_python_arn_version.py
-        continue-on-error: true
+      # --------- Format Report ----------
+      - name: Format Reports
+        run: |
+          echo "# :shield: Security Scan Report" > report.md
+          echo "" >> report.md
+
+          CHECKOV_JSON="Terraform/checkov-report.json"
+          if [ -d "Terraform" ] && [ -f "$CHECKOV_JSON" ]; then
+            CHECKOV_PASSED=$(jq '.summary.passed' "$CHECKOV_JSON" 2>/dev/null || echo "0")
+            CHECKOV_FAILED=$(jq '.summary.failed' "$CHECKOV_JSON" 2>/dev/null || echo "0")
+            CHECKOV_SKIPPED=$(jq '.summary.skipped' "$CHECKOV_JSON" 2>/dev/null || echo "0")
+            CHECKOV_SKIP_MESSAGE=""
+          else
+            CHECKOV_PASSED="0"
+            CHECKOV_FAILED="0"
+            CHECKOV_SKIPPED="0"
+            CHECKOV_SKIP_MESSAGE="⚠️  **Skipped:** Terraform folder not found"
+          fi
+
+          BANDIT_FAILED=$(jq '.results | length' bandit-report.json 2>/dev/null || echo "0")
+          SONAR_FAILED=$(jq '.issues | length' sonar_issues.json 2>/dev/null || echo "0")
+          TRIVY_FAILED=$(jq '[.Results[].Misconfigurations[] | select(.Severity=="HIGH" or .Severity=="CRITICAL")] | length' trivy-report.json 2>/dev/null || echo "0")
+          HADOLINT_FAILED=$(jq 'length' hadolint-report.json 2>/dev/null || echo "0")
+
+          {
+            echo "1️⃣ **Checkov Report**"
+            if [ -n "$CHECKOV_SKIP_MESSAGE" ]; then
+              echo "   - $CHECKOV_SKIP_MESSAGE"
+            else
+              echo "   - 🟢 **PASSED Checks:** $CHECKOV_PASSED"
+              echo "   - 🔴 **FAILED Checks:** $CHECKOV_FAILED"
+              echo "   - ⚠️  **SKIPPED Checks:** $CHECKOV_SKIPPED"
+            fi
+            echo ""
+            echo "2️⃣ **SonarQube Report**"
+            echo "   - 🔴 **FAILED Checks:** $SONAR_FAILED"
+            echo ""
+            echo "3️⃣ **Bandit Report**"
+            echo "   - 🔴 **FAILED Checks:** $BANDIT_FAILED"
+            echo ""
+            echo "4️⃣ **Hadolint Dockerfile Scan**"
+            echo "   - 🔴 **FAILED Checks:** $HADOLINT_FAILED"
+            echo ""
+            echo "5️⃣ **Trivy Dockerfile Scan**"
+            echo "   - 🔴 **FAILED Checks:** $TRIVY_FAILED"
+            echo ""
+            if [ "$CHECKOV_FAILED" -eq 0 ] && [ "$SONAR_FAILED" -eq 0 ] && [ "$BANDIT_FAILED" -eq 0 ] && [ "$TRIVY_FAILED" -eq 0 ] && [ "$HADOLINT_FAILED" -eq 0 ]; then
+              echo ":white_check_mark: Everything looks secure. Great job! 🔐"
+            else
+              echo "*⚡️ Every 🔴 is a risk bomb. Defuse before you MERGE!*"
+            fi
+            echo ""
+            echo "---"
+            echo ""
+          } >> report.md
+
+          export REPO_URL="https://github.com/${GITHUB_REPOSITORY}"
+          export BRANCH="${GITHUB_HEAD_REF:-$(git rev-parse --abbrev-ref HEAD)}"
+
+          # ---------- Checkov ----------
+          echo "## :cloud: Checkov Terraform Scan Detailed Report" >> report.md
+          echo "" >> report.md
+          if [ ! -d "Terraform" ]; then
+            echo ":information_source: **Terraform folder not found in this repository. Checkov scan was skipped.**" >> report.md
+          elif [ -f "$CHECKOV_JSON" ]; then
+            FAILED=$(jq '.results.failed_checks | length' "$CHECKOV_JSON" 2>/dev/null || echo "0")
+            if [ "$FAILED" -gt 0 ]; then
+              jq -r --arg repo_url "$REPO_URL" --arg branch "$BRANCH" '
+                .results.failed_checks[]? |
+                "- **" + (.check_id // "N/A") + ": " + (.check_name // "N/A") + "**\n" +
+                (
+                  if (.file_path // "") != "" and
+                     ((.file_line_range | type) == "array" and (.file_line_range | length) > 0)
+                  then
+                    "  - **Location:** [`" + (.file_path | ltrimstr("/")) + ":" + ((.file_line_range[0]|tostring) // "?") + "`]" +
+                    "(" + $repo_url + "/blob/" + $branch + "/Terraform/" + ((.file_path | ltrimstr("/") | ltrimstr("Terraform/"))) + "#L" + ((.file_line_range[0]|tostring) // "") + ")\n"
+                  elif .resource_address then
+                    "  - **Resource:** `" + .resource_address + "`\n"
+                  else "" end
+                ) +
+                "  - **Severity:** " + ((.severity // "N/A")) + "\n" +
+                "  - **Guideline:** " + ((.guideline // "N/A")) + "\n" +
+                "  - **Description:** " + ((.description // .check_name // "No description provided.")) + "\n" +
+                "---"
+              ' "$CHECKOV_JSON" >> report.md
+            else
+              echo ":white_check_mark: **No failed infrastructure checks found!**" >> report.md
+            fi
+          else
+            echo ":warning: Checkov report not generated." >> report.md
+          fi
+          echo "" >> report.md
+          echo "---" >> report.md
+          echo "" >> report.md
+
+          # ---------- SonarQube ----------
+          echo "## :snake: SonarQube Detailed Report" >> report.md
+          echo "" >> report.md
+          if [ "$SONAR_FAILED" -gt 0 ]; then
+          jq -r --arg repo_url "$REPO_URL" --arg branch "$BRANCH" '
+            . as $root
+            | .issues[]
+            | . as $i
+            | ($root.components[] | select(.key == $i.component)) as $c
+            |
+            "- **Severity:** " + ($i.severity // "N/A") +
+            "\n  - **Type:** " + ($i.type // "N/A") +
+            "\n  - **File:** " + ($c.path // "unknown") +
+            "\n  - **Line:** " + (($i.line | tostring) // "?") +
+            "\n  - **Message:** " + ($i.message // "N/A") +
+            "\n  - **Link:** " +
+              ($repo_url + "/blob/" + $branch + "/" + ($c.path // "") + "#L" + (($i.line | tostring) // "")) +
+            "\n---"
+          ' sonar_issues.json >> report.md
+          else
+            echo ":white_check_mark: **No SonarQube issues found!**" >> report.md
+          fi
+
+          echo "" >> report.md
+          echo "---" >> report.md
+
+          # ---------- Bandit ----------
+          echo "## :snake: Bandit Detailed Report" >> report.md
+          echo "" >> report.md
+          if [ "$BANDIT_FAILED" -gt 0 ]; then
+            jq -r --arg repo_url "$REPO_URL" --arg branch "$BRANCH" '
+              .results[] |
+              .filename as $f |
+              .line_number as $ln |
+              "- **Issue:** " + (.issue_text // "N/A") +
+              "\n  - **File:** " + ($f // "unknown") +
+              "\n  - **Line:** " + (($ln | tostring) // "?") +
+              "\n  - **Severity:** " + (.issue_severity // "N/A") +
+              "\n  - **Confidence:** " + (.issue_confidence // "N/A") +
+              "\n  - **Link:** " +
+                ($repo_url + "/blob/" + $branch + "/" + ($f // "") + "#L" + (($ln | tostring) // "")) +
+              "\n---"
+            ' bandit-report.json >> report.md
+          else
+            echo ":white_check_mark: **No Bandit issues found!**" >> report.md
+          fi
+
+          echo "" >> report.md
+          echo "---" >> report.md
+
+          # ---------- Hadolint ----------
+          echo "## :whale: Hadolint Dockerfile Scan Detailed Report" >> report.md
+          echo "" >> report.md
+          if [ "$HADOLINT_FAILED" -gt 0 ]; then
+            jq -r --arg repo_url "$REPO_URL" --arg branch "$BRANCH" '
+              .[] |
+              .line as $ln |
+              "- **Line:** " + ($ln|tostring) +
+              "\n  - **Code:** " + (.code // "N/A") +
+              "\n  - **Severity:** " + (.level // "N/A") +
+              "\n  - **Message:** " + (.message // "N/A") +
+              "\n  - **Link:** " +
+                ($repo_url + "/blob/" + $branch + "/Dockerfile#L" + (($ln | tostring) // "")) +
+              "\n---"
+            ' hadolint-report.json >> report.md
+          else
+            echo ":white_check_mark: **No Hadolint issues found!**" >> report.md
+          fi
+
+          echo "" >> report.md
+          echo "---" >> report.md
+
+          # ---------- Trivy ----------
+          echo "## :whale: Trivy Dockerfile Scan Detailed Report" >> report.md
+          echo "" >> report.md
+          if [ "$TRIVY_FAILED" -gt 0 ]; then
+            jq -r --arg repo_url "$REPO_URL" --arg branch "$BRANCH" '
+              .Results[].Misconfigurations[] | select(.Severity=="HIGH" or .Severity=="CRITICAL") |
+              "- **ID:** " + (.ID // "N/A") +
+              "\n  - **Type:** " + (.Type // "N/A") +
+              "\n  - **Severity:** " + (.Severity // "N/A") +
+              "\n  - **Message:** " + (.Message // "N/A") +
+              "\n  - **Resolution:** " + (.Resolution // "N/A") +
+              "\n  - **Link:** " +
+                ($repo_url + "/blob/" + $branch + "/Dockerfile#L1") +
+              "\n---"
+            ' trivy-report.json >> report.md
+          else
+            echo ":white_check_mark: **No Trivy Dockerfile issues found!**" >> report.md
+          fi
+
+          echo "" >> report.md
+          echo "---" >> report.md
+          echo "*This report was generated automatically by the Security Scan Pipeline*" >> report.md
+
+      - name: Prepare findings JSON for batched PR comments
+        run: |
+          echo "Collecting all findings into a single JSON file for batching..."
+          
+          # Initialize empty arrays for each tool
+          echo "[]" > sonar_findings.json
+          echo "[]" > bandit_findings.json
+          echo "[]" > trivy_findings.json
+          echo "[]" > hadolint_findings.json
+          echo "[]" > checkov_findings.json
+
+          CHECKOV_JSON="Terraform/checkov-report.json"
+
+          # ---------- SonarQube ----------
+          if [ -f sonar_issues.json ]; then
+            echo "Processing SonarQube issues..."
+            SONAR_ISSUE_COUNT=$(jq '.issues | length' sonar_issues.json 2>/dev/null || echo "0")
+            if [ "$SONAR_ISSUE_COUNT" -gt 0 ]; then
+              jq '[. as $root | .issues[] as $i |
+                     ($root.components[] | select(.key == $i.component)) as $c |
+                     {
+                       path: ($c.path // ""),
+                       line: ($i.line // ($i.textRange.startLine // 1)),
+                       body: ("🔍 **[SonarQube][" + ($i.severity // "N/A") + "][" + ($i.type // "N/A") + "]** " + ($i.message // "N/A"))
+                     } | select(.path != "" and .line > 0)]' sonar_issues.json > sonar_findings.json 2>/dev/null || echo "[]" > sonar_findings.json
+            fi
+          fi
+
+          # ---------- Bandit ----------
+          if [ -f bandit-report.json ]; then
+            echo "Processing Bandit issues..."
+            BANDIT_COUNT=$(jq '.results | length' bandit-report.json 2>/dev/null || echo "0")
+            if [ "$BANDIT_COUNT" -gt 0 ]; then
+              jq '[.results[] | 
+                     {
+                       path: (.filename | sub("^\\./"; "")),
+                       line: .line_number,
+                       body: ("🐍 **[Bandit][" + .issue_severity + "][" + .issue_confidence + "][" + .test_id + "]** " + .issue_text)
+                     } | select(.path != "" and .line > 0)]' bandit-report.json > bandit_findings.json 2>/dev/null || echo "[]" > bandit_findings.json
+            fi
+          fi
+
+          # ---------- Trivy ----------
+          if [ -f trivy-report.json ]; then
+            echo "Processing Trivy issues..."
+            TRIVY_COUNT=$(jq '[.Results[]?.Misconfigurations[]? | select(.Severity=="HIGH" or .Severity=="CRITICAL")] | length' trivy-report.json 2>/dev/null || echo "0")
+            if [ "$TRIVY_COUNT" -gt 0 ]; then
+              jq '[.Results[]? | .Target as $t |
+                     .Misconfigurations[]? |
+                     select(.Severity=="HIGH" or .Severity=="CRITICAL") |
+                     {
+                       path: ($t // "Dockerfile"),
+                       line: (.CauseMetadata.StartLine // 1),
+                       body: ("🐳 **[Trivy][" + .Severity + "][" + (.Type // "N/A") + "][" + (.ID // "N/A") + "]** " + (.Message // "N/A") + " | **Resolution:** " + (.Resolution // "N/A"))
+                     }]' trivy-report.json > trivy_findings.json 2>/dev/null || echo "[]" > trivy_findings.json
+            fi
+          fi
+
+          # ---------- Hadolint ----------
+          if [ -f hadolint-report.json ]; then
+            echo "Processing Hadolint issues..."
+            HADOLINT_COUNT=$(jq 'length' hadolint-report.json 2>/dev/null || echo "0")
+            if [ "$HADOLINT_COUNT" -gt 0 ]; then
+              jq '[.[] | 
+                     {
+                       path: "Dockerfile",
+                       line: .line,
+                       body: ("🐋 **[Hadolint][" + .level + "][" + .code + "]** " + .message)
+                     } | select(.line > 0)]' hadolint-report.json > hadolint_findings.json 2>/dev/null || echo "[]" > hadolint_findings.json
+            fi
+          fi
+
+          # ---------- Checkov ----------
+          if [ -f "$CHECKOV_JSON" ]; then
+            echo "Processing Checkov issues..."
+            if jq -e '.results.failed_checks and (.results.failed_checks|length>0)' "$CHECKOV_JSON" >/dev/null 2>&1; then
+              jq '[.results.failed_checks[] |
+                     {
+                       path: ("Terraform/" + (.file_path | ltrimstr("/") | ltrimstr("Terraform/"))),
+                       line: (if (.file_line_range | type) == "array" and (.file_line_range | length) > 0 then .file_line_range[0] else 1 end),
+                       body: ("☁️ **" + (.check_id // "N/A") + ": " + (.check_name // "N/A") + "**")
+                     } | select(.path != "" and .line > 0)]' "$CHECKOV_JSON" > checkov_findings.json 2>/dev/null || echo "[]" > checkov_findings.json
+            fi
+          fi
+
+          # Merge all findings into one array using add (order: checkov, sonar, bandit, hadolint, trivy)
+          jq -s 'add' checkov_findings.json sonar_findings.json bandit_findings.json hadolint_findings.json trivy_findings.json > all_findings.json
+          
+          # Verify the output is a valid array
+          if ! jq -e 'type == "array"' all_findings.json > /dev/null 2>&1; then
+            echo "Error: all_findings.json is not a valid array, creating empty array"
+            echo "[]" > all_findings.json
+          fi
+          
+          TOTAL_FINDINGS=$(jq 'length' all_findings.json 2>/dev/null || echo "0")
+          echo "Total findings collected: $TOTAL_FINDINGS"
+          
+          # Debug: Show first finding if any
+          if [ "$TOTAL_FINDINGS" -gt 0 ]; then
+            echo "Sample finding:"
+            jq '.[0]' all_findings.json || true
+          fi
+          
+          # Cleanup temporary files
+          rm -f sonar_findings.json bandit_findings.json trivy_findings.json hadolint_findings.json checkov_findings.json
+
+      - name: Post inline review comments with batching and retry
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+
+            if (!fs.existsSync('all_findings.json')) {
+              console.log('❌ No all_findings.json found, skipping inline comments');
+              return;
+            }
+
+            // Read and parse the findings file
+            let findingsData;
+            try {
+              const fileContent = fs.readFileSync('all_findings.json', 'utf8');
+              console.log('📄 File content preview:', fileContent.substring(0, 200));
+              findingsData = JSON.parse(fileContent);
+            } catch (err) {
+              console.error('❌ Error reading or parsing all_findings.json:', err.message);
+              return;
+            }
+
+            // Ensure findings is an array
+            let findings = [];
+            if (Array.isArray(findingsData)) {
+              findings = findingsData;
+            } else if (findingsData && typeof findingsData === 'object') {
+              console.log('⚠️  findings is an object, trying to extract array...');
+              findings = findingsData.findings || findingsData.results || [];
+            } else {
+              console.error('❌ Invalid findings data type:', typeof findingsData);
+              return;
+            }
+
+            console.log(`📊 Total findings loaded: ${findings.length}`);
+
+            if (findings.length === 0) {
+              console.log('✅ No findings to post as comments');
+              return;
+            }
+
+            const commit_id = context.payload.pull_request.head.sha;
+            const { owner, repo } = context.repo;
+            const pull_number = context.issue.number;
+
+            console.log(`📝 Commit ID: ${commit_id}`);
+            console.log(`🔧 Repo: ${owner}/${repo}, PR: ${pull_number}`);
+
+            // Fetch PR files to validate which lines are in the diff
+            console.log('📋 Fetching PR diff to validate comment lines...');
+            let prFiles = [];
+            try {
+              const { data: files } = await github.rest.pulls.listFiles({
+                owner,
+                repo,
+                pull_number,
+              });
+              prFiles = files;
+              console.log(`✅ Found ${prFiles.length} files in PR diff`);
+            } catch (err) {
+              console.error('❌ Error fetching PR files:', err.message);
+              console.log('⚠️  Will attempt to post comments without validation (may fail)');
+            }
+
+            // Build a map of file paths to valid line ranges from the diff
+            const validLinesByFile = new Map();
+            if (prFiles.length > 0) {
+              for (const file of prFiles) {
+                const path = file.filename;
+                const validLines = new Set();
+                
+                // Parse the patch to find which lines are in the diff
+                if (file.patch) {
+                  const lines = file.patch.split('\n');
+                  let newFileLine = 0; // Line number in the new file (what we're commenting on)
+                  
+                  for (const line of lines) {
+                    // Parse unified diff format: @@ -old_start,old_count +new_start,new_count @@
+                    const hunkMatch = line.match(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/);
+                    if (hunkMatch) {
+                      // Reset to the start line of this hunk in the new file
+                      newFileLine = parseInt(hunkMatch[3], 10);
+                    } else if (line.startsWith('+') && !line.startsWith('+++')) {
+                      // Added or modified line in new file - this is a valid line for comments
+                      validLines.add(newFileLine);
+                      newFileLine++;
+                    } else if (line.startsWith(' ')) {
+                      // Context line (unchanged) - also valid for comments
+                      validLines.add(newFileLine);
+                      newFileLine++;
+                    } else if (line.startsWith('-')) {
+                      // Removed line from old file - don't increment new file line number
+                      // Do nothing, don't increment
+                    }
+                  }
+                }
+                
+                if (validLines.size > 0) {
+                  validLinesByFile.set(path, validLines);
+                  console.log(`  📄 ${path}: ${validLines.size} valid lines in diff`);
+                } else {
+                  // If file has no patch (binary or empty), we can't validate lines
+                  console.log(`  ⚠️  ${path}: No patch available, will skip validation`);
+                }
+              }
+            }
+
+            // Build comments array and filter to only valid diff lines
+            const prFilePaths = new Set(prFiles.map(f => f.filename));
+            let filteredCount = 0;
+            
+            const comments = findings
+              .map(f => {
+                if (!f || typeof f !== 'object') {
+                  console.warn('⚠️  Skipping invalid finding:', f);
+                  return null;
+                }
+                const path = (f.path || '').replace(/^\.\//, '');
+                const line = Number(f.line) || 1;
+                
+                // Skip if file is not in PR diff at all
+                if (prFilePaths.size > 0 && !prFilePaths.has(path)) {
+                  filteredCount++;
+                  return null;
+                }
+                
+                // Validate line is in diff if we have PR file data
+                if (validLinesByFile.size > 0) {
+                  const validLines = validLinesByFile.get(path);
+                  if (validLines) {
+                    // File is in diff, check if line is valid
+                    if (!validLines.has(line)) {
+                      filteredCount++;
+                      return null; // Line not in diff, skip this comment
+                    }
+                  }
+                  // If validLines is undefined, file has no patch (binary/empty), skip validation
+                }
+                
+                return {
+                  path: path,
+                  line: line,
+                  side: 'RIGHT',
+                  body: f.body || 'No description available',
+                };
+              })
+              .filter(c => c !== null && c.path && c.line > 0);
+            
+            if (filteredCount > 0) {
+              console.log(`🔍 Filtered out ${filteredCount} findings not in PR diff`);
+            }
+
+            console.log(`✅ Prepared ${comments.length} valid inline comments (filtered from ${findings.length} findings)`);
+
+            if (!comments.length) {
+              console.log('⚠️  No valid comments to post (all filtered out - likely not in PR diff)');
+              return;
+            }
+
+            // Show sample comment
+            console.log('📋 Sample comment:', JSON.stringify(comments[0], null, 2));
+
+            // Reduce chunk size to avoid rate limits and "line must be part of diff" errors
+            const chunkSize = 20;
+            const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+            const postWithRetry = async (fn, description) => {
+              let wait = 3000;
+              for (let attempt = 1; attempt <= 5; attempt++) {
+                try {
+                  return await fn();
+                } catch (err) {
+                  const msg = err && err.message ? err.message : String(err);
+                  const isSecondary = msg.toLowerCase().includes('secondary rate limit');
+                  const isDiffError = msg.toLowerCase().includes('must be part of the diff') || 
+                                     msg.toLowerCase().includes('diff hunk can\'t be blank');
+                  const isServerError = err.status === 502 || err.status === 503 || err.status === 504;
+                  
+                  console.log(`⚠️  Attempt ${attempt} for ${description} failed: ${msg}`);
+                  
+                  // Skip if it's a diff validation error (line not in diff)
+                  if (isDiffError) {
+                    console.log(`⚠️  Skipping due to diff validation error - line not in PR diff`);
+                    return null;
+                  }
+                  
+                  // Retry on rate limit or server errors
+                  if ((isSecondary || isServerError) && attempt < 5) {
+                    console.log(`⏳ ${isSecondary ? 'Rate limit' : 'Server error'} detected, sleeping ${wait}ms before retry`);
+                    await sleep(wait);
+                    wait = Math.min(wait * 2, 90000); // Max 90 seconds
+                    continue;
+                  }
+                  
+                  // Final attempt failed or non-retryable error
+                  console.error(`❌ Failed after ${attempt} attempts: ${msg}`);
+                  return null;
+                }
+              }
+              return null;
+            };
+
+            // Post comments in smaller chunks with longer delays
+            let successCount = 0;
+            let failCount = 0;
+            
+            for (let i = 0; i < comments.length; i += chunkSize) {
+              const chunk = comments.slice(i, i + chunkSize);
+              const chunkNumber = Math.floor(i / chunkSize) + 1;
+              const totalChunks = Math.ceil(comments.length / chunkSize);
+              
+              console.log(`📤 Posting review chunk ${chunkNumber}/${totalChunks} with ${chunk.length} comments`);
+              
+              const result = await postWithRetry(
+                () => github.rest.pulls.createReview({
+                  owner,
+                  repo,
+                  pull_number,
+                  commit_id,
+                  event: 'COMMENT',
+                  comments: chunk,
+                }),
+                `createReview chunk ${chunkNumber}/${totalChunks}`,
+              );
+              
+              if (result) {
+                successCount += chunk.length;
+                console.log(`✅ Successfully posted chunk ${chunkNumber}/${totalChunks}`);
+              } else {
+                failCount += chunk.length;
+                console.log(`⚠️  Skipped chunk ${chunkNumber}/${totalChunks} due to errors`);
+              }
+              
+              // Longer delay between chunks to avoid rate limits
+              if (i + chunkSize < comments.length) {
+                await sleep(3000); // Increased from 1000ms to 3000ms
+              }
+            }
+
+            console.log(`\n📊 Summary: ${successCount} comments posted, ${failCount} failed/skipped`);
+            console.log('✅ Finished posting inline review comments')
+
+      - name: Post Security Scan Summary to PR (with update/reuse)
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+
+            if (!fs.existsSync('report.md')) {
+              console.log('No report.md found, skipping summary comment');
+              return;
+            }
+
+            const reportBody = fs.readFileSync('report.md', 'utf8');
+            const marker = '<!-- security-scan-full-report -->';
+            const commentBody = `${marker}\n${reportBody}`;
+
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+
+            const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+            const postWithRetry = async (fn, description) => {
+              let wait = 2000;
+              for (let attempt = 1; attempt <= 6; attempt++) {
+                try {
+                  return await fn();
+                } catch (err) {
+                  const msg = err && err.message ? err.message : String(err);
+                  const isSecondary = msg.toLowerCase().includes('secondary rate limit');
+                  console.log(`Attempt ${attempt} for ${description} failed: ${msg}`);
+                  
+                  if (!isSecondary || attempt === 6) {
+                    console.error(`Failed after ${attempt} attempts: ${msg}`);
+                    throw err;
+                  }
+                  
+                  console.log(`Secondary rate limit detected, sleeping ${wait}ms before retry`);
+                  await sleep(wait);
+                  wait = Math.min(wait * 2, 60000);
+                }
+              }
+            };
+
+            // List existing comments to find if we already posted a summary
+            console.log('Checking for existing security scan summary comment...');
+            const { data: existingComments } = await github.rest.issues.listComments({
+              owner,
+              repo,
+              issue_number,
+            });
+
+            const existingComment = existingComments.find(comment => 
+              comment.body && comment.body.includes(marker)
+            );
+
+            if (existingComment) {
+              console.log(`Found existing comment (ID: ${existingComment.id}), updating...`);
+              await postWithRetry(
+                () => github.rest.issues.updateComment({
+                  owner,
+                  repo,
+                  comment_id: existingComment.id,
+                  body: commentBody,
+                }),
+                'updateComment for security scan summary',
+              );
+              console.log('✅ Successfully updated existing security scan summary comment');
+            } else {
+              console.log('No existing comment found, creating new one...');
+              await postWithRetry(
+                () => github.rest.issues.createComment({
+                  owner,
+                  repo,
+                  issue_number,
+                  body: commentBody,
+                }),
+                'createComment for security scan summary',
+              );
+              console.log('✅ Successfully created new security scan summary comment');
+            }
